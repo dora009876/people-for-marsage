@@ -348,6 +348,20 @@ export default function DispatchBoard() {
       ? `${totalHoursWhole}小時`
       : `${totalMinsRemainder}分鐘`;
 
+  // 每個編號今日各自累積的人數與分鐘數（用來給統一總覽區塊顯示）
+  const perSlotStats = useMemo(() => {
+    return slots.map((s) => {
+      const entries = log.filter((e) => e.slotId === s.id);
+      return {
+        id: s.id,
+        name: s.name,
+        active: s.active,
+        count: entries.length,
+        minutes: entries.reduce((sum, e) => sum + e.minutes, 0),
+      };
+    });
+  }, [slots, log]);
+
   const exportCsv = () => {
     const header = "人頭,分鐘數,完成時間\n";
     const rows = log
@@ -404,6 +418,11 @@ export default function DispatchBoard() {
     return s ? s.name : `${slotId}號`;
   };
 
+  const isAssignedSlotOffline = (slotId) => {
+    const s = slots.find((s) => s.id === slotId);
+    return s ? !s.active : false;
+  };
+
   return (
     <div className="min-h-screen font-sans" style={{ backgroundColor: C.page, color: C.text }}>
       <style>{`
@@ -420,7 +439,7 @@ export default function DispatchBoard() {
       <div className="max-w-3xl mx-auto px-4 py-6">
         {/* Header */}
         <div className="flex items-baseline justify-between mb-1">
-          <h1 className="text-2xl font-semibold tracking-tight">林老闆專用計時器</h1>
+          <h1 className="text-2xl font-semibold tracking-tight">接單看板</h1>
           <span className="font-mono-num text-base" style={{ color: C.textMuted }}>
             {readyCount}/{activeSlots.length} 可接單
           </span>
@@ -749,13 +768,15 @@ export default function DispatchBoard() {
                       key={s.id}
                       onClick={() => setNewAssignedSlotId(s.id)}
                       className="rounded-lg px-2.5 py-1.5 text-sm font-medium border-2 transition-all"
-                      style={
-                        picked
+                      style={{
+                        ...(picked
                           ? { backgroundColor: C.assign, color: C.assignText, borderColor: "#E3CFFF" }
-                          : { backgroundColor: C.chipBg, color: C.chipText, borderColor: "transparent" }
-                      }
+                          : { backgroundColor: C.chipBg, color: C.chipText, borderColor: "transparent" }),
+                        opacity: s.active ? 1 : 0.55,
+                      }}
                     >
                       {s.name}
+                      {!s.active && "（未上線）"}
                     </button>
                   );
                 })}
@@ -811,10 +832,15 @@ export default function DispatchBoard() {
                     <button
                       onClick={() => setAssignment(q.id, null)}
                       className="flex items-center gap-1 text-xs font-semibold px-2 py-0.5 rounded-full flex-shrink-0"
-                      style={{ backgroundColor: C.assign, color: C.assignText }}
+                      style={
+                        isAssignedSlotOffline(q.assignedSlotId)
+                          ? { backgroundColor: C.offlineBg, color: C.offlineText, border: `1px solid ${C.offlineBorder}` }
+                          : { backgroundColor: C.assign, color: C.assignText }
+                      }
                       title="點一下取消指定"
                     >
                       指定 {assignedSlotLabel(q.assignedSlotId)}
+                      {isAssignedSlotOffline(q.assignedSlotId) && "（未上線）"}
                     </button>
                   )}
                   <span
@@ -845,6 +871,45 @@ export default function DispatchBoard() {
           )}
         </div>
 
+        {/* 每個編號今日累積接待人數總覽 */}
+        <div
+          className="rounded-xl border p-4 mt-8"
+          style={{ backgroundColor: C.panelBg, borderColor: C.panelBorder }}
+        >
+          <h2 className="text-lg font-semibold mb-3">各編號今日接待人數</h2>
+          <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
+            {perSlotStats.map((stat) => (
+              <div
+                key={stat.id}
+                className="rounded-lg px-3 py-2.5 flex flex-col items-center"
+                style={{
+                  backgroundColor: stat.active ? C.chipBg : C.offlineBg,
+                  border: stat.active ? "none" : `1px solid ${C.offlineBorder}`,
+                }}
+              >
+                <span className="text-sm truncate max-w-full" style={{ color: C.chipText }}>
+                  {stat.name}
+                </span>
+                <span
+                  className="font-mono-num text-2xl font-semibold"
+                  style={{ color: stat.active ? C.text : C.offlineDot }}
+                >
+                  {stat.count}
+                </span>
+                {stat.active ? (
+                  <span className="text-sm" style={{ color: C.textFaint }}>
+                    {stat.minutes} 分
+                  </span>
+                ) : (
+                  <span className="text-sm font-medium" style={{ color: C.offlineText }}>
+                    未上線
+                  </span>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+
         {/* 未上線人頭：固定沉在最底部 */}
         {offlineSlots.length > 0 && (
           <div className="mt-8">
@@ -857,6 +922,7 @@ export default function DispatchBoard() {
             <div className="space-y-2">
               {offlineSlots.map((slot) => {
                 const slotLog = log.filter((e) => e.slotId === slot.id);
+                const assignedCustomer = queue.find((q) => q.assignedSlotId === slot.id);
                 return (
                 <div
                   key={slot.id}
@@ -878,6 +944,15 @@ export default function DispatchBoard() {
                       </span>
                     )}
                   </span>
+                  {assignedCustomer && (
+                    <span
+                      className="text-xs font-medium px-2 py-1 rounded-full flex-shrink-0 whitespace-nowrap"
+                      style={{ backgroundColor: C.chipBg, color: C.chipText }}
+                      title="這個人頭還有顧客指定給他，記得上線後處理"
+                    >
+                      有顧客等待
+                    </span>
+                  )}
                   {slot.savedRemainingMs ? (
                     <button
                       onClick={() => restoreSlot(slot.id)}
