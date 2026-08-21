@@ -420,7 +420,7 @@ export default function DispatchBoard() {
       <div className="max-w-3xl mx-auto px-4 py-6">
         {/* Header */}
         <div className="flex items-baseline justify-between mb-1">
-          <h1 className="text-2xl font-semibold tracking-tight">接單看板</h1>
+          <h1 className="text-2xl font-semibold tracking-tight">林老闆專用計時器</h1>
           <span className="font-mono-num text-base" style={{ color: C.textMuted }}>
             {readyCount}/{activeSlots.length} 可接單
           </span>
