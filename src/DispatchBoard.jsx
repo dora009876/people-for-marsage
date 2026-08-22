@@ -488,7 +488,7 @@ export default function DispatchBoard() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `接單紀錄_${dayKey}.csv`;
+    a.download = `來客登記表_${dayKey}.csv`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
