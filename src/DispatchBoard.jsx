@@ -152,6 +152,12 @@ function formatClockTime(ts) {
   return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 }
 
+const ORDINAL_CN = ["一", "二", "三", "四", "五", "六", "七", "八", "九", "十"];
+function ordinalLabel(rank) {
+  const word = ORDINAL_CN[rank - 1] || rank;
+  return `第${word}結束`;
+}
+
 export default function DispatchBoard() {
   const [slots, setSlots] = useState(defaultSlots());
   const [now, setNow] = useState(Date.now());
@@ -392,19 +398,19 @@ export default function DispatchBoard() {
   const activeSlots = slots.filter((s) => s.active);
   const readyCount = activeSlots.filter((s) => !s.readyAt || s.readyAt <= now).length;
 
-  const soonestId = useMemo(() => {
-    let best = null;
-    let bestRemaining = Infinity;
-    slots.forEach((s) => {
-      if (s.active && s.readyAt && s.readyAt > now) {
-        const remaining = s.readyAt - now;
-        if (remaining < bestRemaining) {
-          bestRemaining = remaining;
-          best = s.id;
-        }
-      }
+  // 有空位（可接單）時不需要排名，因為「可接單」本身就代表有空位。
+  // 只有當所有上線中的人頭都在計時（沒有空位）時，才依結束時間先後排名，顯示「第一結束」「第二結束」…
+  const finishRankMap = useMemo(() => {
+    const onlineActive = slots.filter((s) => s.active);
+    if (onlineActive.length === 0) return {};
+    const allBusy = onlineActive.every((s) => s.readyAt && s.readyAt > now);
+    if (!allBusy) return {};
+    const sorted = [...onlineActive].sort((a, b) => a.readyAt - b.readyAt);
+    const map = {};
+    sorted.forEach((s, idx) => {
+      map[s.id] = idx + 1;
     });
-    return best;
+    return map;
   }, [slots, now]);
 
   // 上線中的人頭顯示在主看板；未上線的沉到頁面最底部（顧客名單下方）
@@ -539,7 +545,7 @@ export default function DispatchBoard() {
         .urgent-pulse { animation: pulse-urgent 1.4s ease-in-out infinite; }
       `}</style>
 
-      <div className="max-w-3xl mx-auto px-4 py-6">
+      <div className="max-w-3xl lg:max-w-5xl mx-auto px-4 py-6">
         {/* Header */}
         <div className="flex items-baseline justify-between mb-1">
           <h1 className="text-2xl font-semibold tracking-tight">林老闆專用計時器</h1>
@@ -548,7 +554,7 @@ export default function DispatchBoard() {
           </span>
         </div>
         <p className="text-base mb-4" style={{ color: C.textFaint }}>
-          藍底 = 最快恢復・紅底 = 剩不到5分鐘・電源鍵可關閉今日未上線人頭
+          藍底 = 全部客滿時最快結束・紅底 = 剩不到5分鐘・電源鍵可關閉今日未上線人頭
         </p>
 
         {/* 今日統計條 */}
@@ -591,12 +597,13 @@ export default function DispatchBoard() {
         </div>
 
         {/* Grid */}
-        <div className="grid grid-cols-1 gap-4 mb-8">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-8">
           {onlineSlots.map((slot) => {
             const remaining = slot.readyAt ? slot.readyAt - now : 0;
             const isReady = remaining <= 0;
             const isUrgent = !isReady && remaining <= URGENT_MS;
-            const isSoonest = !isReady && slot.id === soonestId;
+            const finishRank = finishRankMap[slot.id]; // 只有「全部都在計時、沒有空位」時才會有值
+            const isSoonest = finishRank === 1;
 
             let bgColor = C.normalBg;
             let borderColor = C.normalBorder;
@@ -637,17 +644,25 @@ export default function DispatchBoard() {
                 }`}
                 style={{ backgroundColor: bgColor, borderColor: borderColor }}
               >
-                {isSoonest && (
+                {finishRank && (
                   <div
-                    className="absolute -top-2 -right-2 flex items-center gap-0.5 text-xs font-semibold px-2 py-0.5 rounded-full"
-                    style={{
-                      backgroundColor: C.soonestBadgeBg,
-                      color: C.soonestBadgeText,
-                      boxShadow: "0 0 8px rgba(143,208,255,0.7)",
-                    }}
+                    className="absolute -top-2 -right-2 flex items-center gap-0.5 text-xs font-semibold px-2 py-0.5 rounded-full whitespace-nowrap"
+                    style={
+                      isSoonest
+                        ? {
+                            backgroundColor: C.soonestBadgeBg,
+                            color: C.soonestBadgeText,
+                            boxShadow: "0 0 8px rgba(143,208,255,0.7)",
+                          }
+                        : {
+                            backgroundColor: C.chipBg,
+                            color: C.chipText,
+                            border: `1px solid ${C.chipBorder}`,
+                          }
+                    }
                   >
-                    <Zap size={10} strokeWidth={3} />
-                    最快
+                    {isSoonest && <Zap size={10} strokeWidth={3} />}
+                    {ordinalLabel(finishRank)}
                   </div>
                 )}
 
@@ -943,7 +958,7 @@ export default function DispatchBoard() {
               目前沒有等待中的顧客
             </p>
           ) : (
-            <div className="space-y-2">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
               {queue.map((q, idx) => (
                 <div
                   key={q.id}
@@ -1021,7 +1036,7 @@ export default function DispatchBoard() {
           style={{ backgroundColor: C.panelBg, borderColor: C.panelBorder }}
         >
           <h2 className="text-lg font-semibold mb-4">各編號今日接待人數</h2>
-          <div className="space-y-3">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
             {perSlotStats.filter((stat) => stat.active).map((stat) => (
               <div
                 key={stat.id}
@@ -1095,7 +1110,7 @@ export default function DispatchBoard() {
             <p className="text-base mb-3" style={{ color: C.textMuted }}>
               不小心關到還在跑的人頭？按「復原計時」馬上接回原本的倒數
             </p>
-            <div className="space-y-2">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
               {offlineSlots.map((slot) => {
                 const slotLog = log.filter((e) => e.slotId === slot.id);
                 const assignedCustomer = queue.find((q) => q.assignedSlotId === slot.id);
