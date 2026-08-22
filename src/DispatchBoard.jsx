@@ -36,7 +36,7 @@ const storage = {
 // 測試模式開關：平常正式使用請保持 60 * 1000（代表 1 分鐘 = 60 秒）。
 // 想快速測試時，把下面這一行改成 1000（1 分鐘 = 1 秒，方便快速測試倒數/完成邏輯），
 // 測完記得改回 60 * 1000，並按畫面上的「歸零」清掉測試產生的假紀錄，避免跟正式資料混在一起。
-const MINUTE_MS = 1000; // ← 測試時把這裡改成 1000，測完改回 60 * 1000
+const MINUTE_MS = 60 * 1000; // ← 測試時把這裡改成 1000，測完改回 60 * 1000
 // ============================================
 
 const URGENT_MS = 5 * MINUTE_MS; // 5 分鐘內 = 緊急
@@ -448,18 +448,23 @@ export default function DispatchBoard() {
   }, [slots, log]);
 
   const exportCsv = () => {
-    const header = "人頭,分鐘數,單位組成,金額,完成時間\n";
-    const rows = log
-      .map((e) => {
-        const t = new Date(e.time);
-        const ts = `${String(t.getHours()).padStart(2, "0")}:${String(
-          t.getMinutes()
-        ).padStart(2, "0")}:${String(t.getSeconds()).padStart(2, "0")}`;
-        const unitsLabel = (e.units || []).join("+");
-        const price = e.price != null ? e.price : calcPrice(e.units);
-        return `${e.slotName},${e.minutes},${unitsLabel},${price},${ts}`;
-      })
-      .join("\n");
+    // 每個編號各自的金額清單，依完成時間先後排序（第1單、第2單...）
+    const perSlotPrices = slots.map((s) => {
+      const entries = log
+        .filter((e) => e.slotId === s.id)
+        .slice()
+        .sort((a, b) => a.time - b.time);
+      return entries.map((e) => (e.price != null ? e.price : calcPrice(e.units)));
+    });
+    const maxRows = Math.max(0, ...perSlotPrices.map((arr) => arr.length));
+
+    const header = "," + slots.map((s) => s.name).join(",") + "\n";
+    let rows = "";
+    for (let i = 0; i < maxRows; i++) {
+      const rowCells = perSlotPrices.map((arr) => (arr[i] != null ? `${arr[i]}元` : ""));
+      rows += `${i + 1},${rowCells.join(",")}\n`;
+    }
+
     const totalRevenue = log.reduce(
       (sum, e) => sum + (e.price != null ? e.price : calcPrice(e.units)),
       0
