@@ -465,12 +465,18 @@ export default function DispatchBoard() {
       rows += `${i + 1},${rowCells.join(",")}\n`;
     }
 
+    // 個人小計：每個編號當天的總金額
+    const subtotalCells = perSlotPrices.map(
+      (arr) => `${arr.reduce((sum, p) => sum + p, 0)}元`
+    );
+    const subtotalRow = `小計,${subtotalCells.join(",")}\n`;
+
     const totalRevenue = log.reduce(
       (sum, e) => sum + (e.price != null ? e.price : calcPrice(e.units)),
       0
     );
     const summary = `\n總計,人頭次,${totalCount}\n總計,時數,${totalTimeLabel}\n總計,金額,NT$${totalRevenue}`;
-    const csv = "\uFEFF" + header + rows + summary;
+    const csv = "\uFEFF" + header + rows + subtotalRow + summary;
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
