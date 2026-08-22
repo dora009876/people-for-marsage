@@ -412,6 +412,11 @@ export default function DispatchBoard() {
   const offlineSlots = useMemo(() => slots.filter((s) => !s.active), [slots]);
 
   const totalCount = log.length;
+  const totalRevenue = log.reduce(
+    (sum, e) => sum + (e.price != null ? e.price : calcPrice(e.units)),
+    0
+  );
+  const totalOwed25 = Math.round(totalRevenue * 0.25);
   const totalMinutes = log.reduce((sum, e) => sum + e.minutes, 0);
   const totalHoursWhole = Math.floor(totalMinutes / 60);
   const totalMinsRemainder = totalMinutes % 60;
@@ -471,10 +476,6 @@ export default function DispatchBoard() {
     );
     const subtotalRow = `小計,${subtotalCells.join(",")}\n`;
 
-    const totalRevenue = log.reduce(
-      (sum, e) => sum + (e.price != null ? e.price : calcPrice(e.units)),
-      0
-    );
     const summary = `\n總計,人頭次,${totalCount}\n總計,金額,NT$${totalRevenue}`;
     const csv = "\uFEFF" + header + rows + subtotalRow + summary;
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
@@ -552,13 +553,21 @@ export default function DispatchBoard() {
 
         {/* 今日統計條 */}
         <div
-          className="flex items-center justify-between mb-5 rounded-xl border px-4 py-3"
+          className="flex flex-wrap items-center justify-between gap-3 mb-5 rounded-xl border px-4 py-3"
           style={{ backgroundColor: C.panelBg, borderColor: C.panelBorder }}
         >
-          <div className="flex gap-6">
+          <div className="flex flex-wrap gap-6">
             <div>
               <div className="font-mono-num text-2xl font-semibold">{totalCount}</div>
               <div className="text-sm" style={{ color: C.textMuted }}>今日人頭次</div>
+            </div>
+            <div>
+              <div className="font-mono-num text-2xl font-semibold">NT${totalRevenue}</div>
+              <div className="text-sm" style={{ color: C.textMuted }}>總收入</div>
+            </div>
+            <div>
+              <div className="font-mono-num text-2xl font-semibold">NT${totalOwed25}</div>
+              <div className="text-sm" style={{ color: C.textMuted }}>應收金額（25%）</div>
             </div>
           </div>
           <div className="flex gap-2">
