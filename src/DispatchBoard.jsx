@@ -32,12 +32,28 @@ const storage = {
   },
 };
 
-const UNIT_MS = 10 * 60 * 1000; // 10 分鐘
-const URGENT_MS = 5 * 60 * 1000; // 5 分鐘內 = 緊急
+// ============================================
+// 測試模式開關：平常正式使用請保持 60 * 1000（代表 1 分鐘 = 60 秒）。
+// 想快速測試時，把下面這一行改成 1000（1 分鐘 = 1 秒，方便快速測試倒數/完成邏輯），
+// 測完記得改回 60 * 1000，並按畫面上的「歸零」清掉測試產生的假紀錄，避免跟正式資料混在一起。
+const MINUTE_MS = 60 * 1000; // ← 測試時把這裡改成 1000，測完改回 60 * 1000
+// ============================================
+
+const URGENT_MS = 5 * MINUTE_MS; // 5 分鐘內 = 緊急
 const SLOT_COUNT = 10;
 const SLOTS_KEY = "dispatch-board:slots";
 const LOG_KEY_PREFIX = "dispatch-board:log:"; // + 日期 yyyy-mm-dd
 const QUEUE_KEY = "dispatch-board:queue";
+
+// 每種單位對應的分鐘數與收費，第一個是主要按鈕（+15分鐘），第二個是次要按鈕（+10分鐘）
+const UNIT_OPTIONS = [
+  { minutes: 15, price: 200 },
+  { minutes: 10, price: 100 },
+];
+const PRICE_MAP = { 15: 200, 10: 100 };
+function calcPrice(units) {
+  return (units || []).reduce((sum, u) => sum + (PRICE_MAP[u] || 0), 0);
+}
 
 // 全站顏色統一在這裡管理，畫面上一律用 inline style 套用，
 // 確保顏色一定生效（不依賴任何 CSS class 編譯）。白底淺色主題。
@@ -116,9 +132,11 @@ function defaultSlots() {
     name: `${i + 1}號`,
     readyAt: null,
     cycleMinutes: 0,
+    unitHistory: [], // 這一輪依序按過的單位（例如 [15, 15, 10]），用來支援「上一步」跟精準計費
     active: true, // 是否今日上線接單
     savedRemainingMs: null, // 不小心關台時，暫存當下還剩多少毫秒
     savedCycleMinutes: 0,
+    savedUnitHistory: [],
   }));
 }
 
@@ -146,7 +164,9 @@ export default function DispatchBoard() {
   const [newColor, setNewColor] = useState(COLOR_SWATCHES[0].hex);
   const [newNote, setNewNote] = useState("");
   const [newAssignedSlotId, setNewAssignedSlotId] = useState(null);
+  const [resetConfirmId, setResetConfirmId] = useState(null); // 正在等待第二次確認歸零的人頭id
   const loadedRef = useRef(false);
+  const resetConfirmTimeoutRef = useRef(null);
   const dayKey = useMemo(() => todayKey(), []);
 
   useEffect(() => {
@@ -159,9 +179,11 @@ export default function DispatchBoard() {
             setSlots(
               parsed.map((s) => ({
                 cycleMinutes: 0,
+                unitHistory: [],
                 active: true,
                 savedRemainingMs: null,
                 savedCycleMinutes: 0,
+                savedUnitHistory: [],
                 ...s,
               }))
             );
@@ -200,9 +222,11 @@ export default function DispatchBoard() {
               slotId: s.id,
               slotName: s.name,
               minutes: s.cycleMinutes,
+              units: s.unitHistory,
+              price: calcPrice(s.unitHistory),
               time: s.readyAt,
             });
-            return { ...s, cycleMinutes: 0 };
+            return { ...s, cycleMinutes: 0, unitHistory: [] };
           }
           return s;
         });
@@ -243,7 +267,7 @@ export default function DispatchBoard() {
     })();
   }, [queue, loaded]);
 
-  const addUnit = useCallback((id) => {
+  const addMinutes = useCallback((id, minutes) => {
     setSlots((prev) =>
       prev.map((s) => {
         if (s.id !== id || !s.active) return s;
@@ -251,8 +275,9 @@ export default function DispatchBoard() {
         const base = isCurrentlyReady ? Date.now() : s.readyAt;
         return {
           ...s,
-          readyAt: base + UNIT_MS,
-          cycleMinutes: (isCurrentlyReady ? 0 : s.cycleMinutes) + 10,
+          readyAt: base + minutes * MINUTE_MS,
+          cycleMinutes: (isCurrentlyReady ? 0 : s.cycleMinutes) + minutes,
+          unitHistory: [...(isCurrentlyReady ? [] : s.unitHistory), minutes],
         };
       })
     );
@@ -260,19 +285,51 @@ export default function DispatchBoard() {
 
   const resetSlot = useCallback((id) => {
     setSlots((prev) =>
-      prev.map((s) => (s.id === id ? { ...s, readyAt: null, cycleMinutes: 0 } : s))
+      prev.map((s) =>
+        s.id === id ? { ...s, readyAt: null, cycleMinutes: 0, unitHistory: [] } : s
+      )
     );
   }, []);
+
+  // 歸零需要按兩次才會真的執行：第一次按下變成「確定歸零？」，3秒內沒再按就自動取消。
+  // 不用瀏覽器原生的 confirm() 彈窗，因為在部分嵌入環境（例如預覽畫面）裡會被封鎖而完全沒反應。
+  const handleResetClick = useCallback(
+    (id) => {
+      if (resetConfirmTimeoutRef.current) {
+        clearTimeout(resetConfirmTimeoutRef.current);
+        resetConfirmTimeoutRef.current = null;
+      }
+      setResetConfirmId((prevId) => {
+        if (prevId === id) {
+          resetSlot(id);
+          return null;
+        }
+        resetConfirmTimeoutRef.current = setTimeout(() => {
+          setResetConfirmId(null);
+        }, 3000);
+        return id;
+      });
+    },
+    [resetSlot]
+  );
 
   const undoUnit = useCallback((id) => {
     setSlots((prev) =>
       prev.map((s) => {
-        if (s.id !== id || !s.active || s.cycleMinutes <= 0 || !s.readyAt) return s;
-        const newCycleMinutes = s.cycleMinutes - 10;
+        if (s.id !== id || !s.active || s.cycleMinutes <= 0 || !s.readyAt || s.unitHistory.length === 0)
+          return s;
+        const lastMinutes = s.unitHistory[s.unitHistory.length - 1];
+        const newCycleMinutes = s.cycleMinutes - lastMinutes;
+        const newHistory = s.unitHistory.slice(0, -1);
         if (newCycleMinutes <= 0) {
-          return { ...s, readyAt: null, cycleMinutes: 0 };
+          return { ...s, readyAt: null, cycleMinutes: 0, unitHistory: [] };
         }
-        return { ...s, readyAt: s.readyAt - UNIT_MS, cycleMinutes: newCycleMinutes };
+        return {
+          ...s,
+          readyAt: s.readyAt - lastMinutes * MINUTE_MS,
+          cycleMinutes: newCycleMinutes,
+          unitHistory: newHistory,
+        };
       })
     );
   }, []);
@@ -282,7 +339,7 @@ export default function DispatchBoard() {
       prev.map((s) => {
         if (s.id !== id) return s;
         if (s.active) {
-          // 關台：如果當下正在冷卻中，先暫存剩餘時間，之後可以馬上復原
+          // 關台：如果當下正在冷卻中，先暫存剩餘時間跟單位組成，之後可以馬上復原
           const remaining = s.readyAt ? s.readyAt - Date.now() : 0;
           const hasRunningTimer = remaining > 0;
           return {
@@ -290,8 +347,10 @@ export default function DispatchBoard() {
             active: false,
             readyAt: null,
             cycleMinutes: 0,
+            unitHistory: [],
             savedRemainingMs: hasRunningTimer ? remaining : null,
             savedCycleMinutes: hasRunningTimer ? s.cycleMinutes : 0,
+            savedUnitHistory: hasRunningTimer ? s.unitHistory : [],
           };
         }
         // 一般開台（非復原）：從「可接單」重新開始，不動用暫存的計時
@@ -309,8 +368,10 @@ export default function DispatchBoard() {
           active: true,
           readyAt: Date.now() + s.savedRemainingMs,
           cycleMinutes: s.savedCycleMinutes,
+          unitHistory: s.savedUnitHistory,
           savedRemainingMs: null,
           savedCycleMinutes: 0,
+          savedUnitHistory: [],
         };
       })
     );
@@ -361,32 +422,49 @@ export default function DispatchBoard() {
       ? `${totalHoursWhole}小時`
       : `${totalMinsRemainder}分鐘`;
 
-  // 每個編號今日各自累積的人數與分鐘數（用來給統一總覽區塊顯示）
+  // 每個編號今日各自累積的人數，以及每一筆的分鐘數／金額明細（用來給統一總覽區塊顯示）
   const perSlotStats = useMemo(() => {
     return slots.map((s) => {
       const entries = log.filter((e) => e.slotId === s.id);
+      const mappedEntries = entries.map((e) => ({
+        minutes: e.minutes,
+        price: e.price != null ? e.price : calcPrice(e.units),
+        time: e.time,
+      }));
+      const totalRevenue = mappedEntries.reduce((sum, e) => sum + e.price, 0);
+      const share25 = Math.round(totalRevenue * 0.25);
+      const share75 = totalRevenue - share25;
       return {
         id: s.id,
         name: s.name,
         active: s.active,
         count: entries.length,
-        minutes: entries.reduce((sum, e) => sum + e.minutes, 0),
+        totalRevenue,
+        share25,
+        share75,
+        entries: mappedEntries,
       };
     });
   }, [slots, log]);
 
   const exportCsv = () => {
-    const header = "人頭,分鐘數,完成時間\n";
+    const header = "人頭,分鐘數,單位組成,金額,完成時間\n";
     const rows = log
       .map((e) => {
         const t = new Date(e.time);
         const ts = `${String(t.getHours()).padStart(2, "0")}:${String(
           t.getMinutes()
         ).padStart(2, "0")}:${String(t.getSeconds()).padStart(2, "0")}`;
-        return `${e.slotName},${e.minutes},${ts}`;
+        const unitsLabel = (e.units || []).join("+");
+        const price = e.price != null ? e.price : calcPrice(e.units);
+        return `${e.slotName},${e.minutes},${unitsLabel},${price},${ts}`;
       })
       .join("\n");
-    const summary = `\n總計,人頭次,${totalCount}\n總計,時數,${totalTimeLabel}`;
+    const totalRevenue = log.reduce(
+      (sum, e) => sum + (e.price != null ? e.price : calcPrice(e.units)),
+      0
+    );
+    const summary = `\n總計,人頭次,${totalCount}\n總計,時數,${totalTimeLabel}\n總計,金額,NT$${totalRevenue}`;
     const csv = "\uFEFF" + header + rows + summary;
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
@@ -503,7 +581,6 @@ export default function DispatchBoard() {
             const isReady = remaining <= 0;
             const isUrgent = !isReady && remaining <= URGENT_MS;
             const isSoonest = !isReady && slot.id === soonestId;
-            const stackedUnits = isReady ? 0 : Math.ceil(remaining / UNIT_MS);
 
             let bgColor = C.normalBg;
             let borderColor = C.normalBorder;
@@ -590,9 +667,9 @@ export default function DispatchBoard() {
                     <span
                       className="text-sm font-semibold px-2 py-1 rounded-full whitespace-nowrap"
                       style={{ backgroundColor: C.panelBg, color: C.textMuted }}
-                      title="今日這個人頭已完成的人數・分鐘數"
+                      title="今日這個人頭已完成的人數"
                     >
-                      今日已完成 {slotCount} 人・{slotMinutes} 分
+                      今日已完成 {slotCount} 人
                     </span>
                     <button
                       onClick={() => toggleActive(slot.id)}
@@ -647,41 +724,69 @@ export default function DispatchBoard() {
                         {formatRemaining(remaining)}
                       </span>
                       <span className="text-xl mt-1" style={{ color: C.textMuted }}>
-                        疊加 {stackedUnits} 個單位・{formatClockTime(slot.readyAt)} 結束
+                        累積 {slot.cycleMinutes} 分鐘・NT${calcPrice(slot.unitHistory)}・
+                        {formatClockTime(slot.readyAt)} 結束
                       </span>
                     </>
                   )}
                 </div>
 
                 {/* 操作 */}
-                <div className="flex gap-3 mt-auto">
+                <div className="grid grid-cols-2 gap-3 mt-auto">
                   <button
-                    onClick={() => addUnit(slot.id)}
-                    className="flex-1 flex items-center justify-center gap-2 rounded-lg active:scale-95 transition-all py-3.5 text-lg font-medium"
+                    onClick={() => addMinutes(slot.id, 15)}
+                    className="flex items-center justify-center gap-2 rounded-lg active:scale-95 transition-all py-4 text-xl font-semibold whitespace-nowrap"
                     style={{ backgroundColor: C.chipBg, color: C.text, border: `1px solid ${C.chipBorder}` }}
                   >
-                    <Plus size={18} />
+                    <Plus size={20} />
+                    15分鐘
+                  </button>
+                  <button
+                    onClick={() => addMinutes(slot.id, 10)}
+                    className="flex items-center justify-center gap-2 rounded-lg active:scale-95 transition-all py-4 text-xl font-semibold whitespace-nowrap"
+                    style={{ backgroundColor: C.chipBg, color: C.text, border: `1px solid ${C.chipBorder}` }}
+                  >
+                    <Plus size={20} />
                     10分鐘
                   </button>
                   {!isReady && (
-                    <>
+                    <div className="col-span-2 flex gap-3">
                       <button
                         onClick={() => undoUnit(slot.id)}
-                        className="rounded-lg active:scale-95 transition-all px-4 text-base font-medium whitespace-nowrap"
-                        style={{ backgroundColor: C.chipBg, color: C.text, border: `1px solid ${C.chipBorder}` }}
-                        title="退回上一個10分鐘單位"
+                        className="rounded-lg active:scale-95 transition-all py-3 text-lg font-medium whitespace-nowrap"
+                        style={{
+                          flex: 2,
+                          backgroundColor: C.chipBg,
+                          color: C.text,
+                          border: `1px solid ${C.chipBorder}`,
+                        }}
+                        title="退回最後一次按的單位"
                       >
                         上一步
                       </button>
                       <button
-                        onClick={() => resetSlot(slot.id)}
-                        className="rounded-lg active:scale-95 transition-all px-4 text-base font-medium whitespace-nowrap"
-                        style={{ backgroundColor: C.chipBg, color: C.text, border: `1px solid ${C.chipBorder}` }}
-                        title="重置為可接單"
+                        onClick={() => handleResetClick(slot.id)}
+                        className="rounded-lg active:scale-95 transition-all py-3 text-sm font-medium whitespace-nowrap"
+                        style={
+                          resetConfirmId === slot.id
+                            ? {
+                                flex: 1,
+                                backgroundColor: C.urgentBg,
+                                color: C.urgentText,
+                                border: `1px solid ${C.urgentBorder}`,
+                              }
+                            : {
+                                flex: 1,
+                                backgroundColor: C.page,
+                                color: C.textFaint,
+                                border: `1px solid ${C.panelBorder}`,
+                              }
+                        }
+                        title="重置為可接單（需要按兩次確認）"
                       >
-                        歸零
+                        {resetConfirmId === slot.id ? "確定歸零？" : "歸零"}
                       </button>
-                    </>
+                    </div>
                   )}
                 </div>
               </div>
@@ -896,37 +1001,69 @@ export default function DispatchBoard() {
 
         {/* 每個編號今日累積接待人數總覽 */}
         <div
-          className="rounded-xl border p-4 mt-8"
+          className="rounded-xl border p-5 mt-8"
           style={{ backgroundColor: C.panelBg, borderColor: C.panelBorder }}
         >
-          <h2 className="text-lg font-semibold mb-3">各編號今日接待人數</h2>
-          <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
-            {perSlotStats.map((stat) => (
+          <h2 className="text-lg font-semibold mb-4">各編號今日接待人數</h2>
+          <div className="space-y-3">
+            {perSlotStats.filter((stat) => stat.active).map((stat) => (
               <div
                 key={stat.id}
-                className="rounded-lg px-3 py-2.5 flex flex-col items-center"
+                className="rounded-lg p-4"
                 style={{
                   backgroundColor: stat.active ? C.chipBg : C.offlineBg,
                   border: `1px solid ${stat.active ? C.chipBorder : C.offlineBorder}`,
                 }}
               >
-                <span className="text-sm truncate max-w-full" style={{ color: C.chipText }}>
-                  {stat.name}
-                </span>
-                <span
-                  className="font-mono-num text-2xl font-semibold"
-                  style={{ color: stat.active ? C.text : C.offlineDot }}
-                >
-                  {stat.count}
-                </span>
-                {stat.active ? (
-                  <span className="text-sm" style={{ color: C.textFaint }}>
-                    {stat.minutes} 分
+                <div className="flex items-center justify-between mb-2">
+                  <span
+                    className="text-lg font-semibold"
+                    style={{ color: stat.active ? C.text : C.offlineText }}
+                  >
+                    {stat.name}
+                    {!stat.active && (
+                      <span className="text-sm font-normal ml-2" style={{ color: C.offlineDot }}>
+                        （未上線）
+                      </span>
+                    )}
                   </span>
+                  <span
+                    className="text-base font-semibold"
+                    style={{ color: stat.active ? C.text : C.offlineDot }}
+                  >
+                    今日已收 {stat.totalRevenue} 元
+                  </span>
+                </div>
+
+                {stat.totalRevenue > 0 && (
+                  <div className="mb-2 text-right">
+                    <p className="text-sm font-medium" style={{ color: C.text }}>
+                      25%：NT${stat.share25}
+                    </p>
+                    <p className="text-sm font-medium" style={{ color: C.text }}>
+                      75%：NT${stat.share75}
+                    </p>
+                  </div>
+                )}
+
+                {stat.entries.length === 0 ? (
+                  <p className="text-sm" style={{ color: C.textFaint }}>今日尚無紀錄</p>
                 ) : (
-                  <span className="text-sm font-medium" style={{ color: C.offlineText }}>
-                    未上線
-                  </span>
+                  <div className="flex flex-wrap gap-2">
+                    {stat.entries.map((entry, idx) => (
+                      <span
+                        key={idx}
+                        className="text-base font-medium px-3 py-1.5 rounded-lg whitespace-nowrap"
+                        style={{
+                          backgroundColor: C.page,
+                          color: C.text,
+                          border: `1px solid ${C.panelBorder}`,
+                        }}
+                      >
+                        {entry.minutes}分鐘・NT${entry.price}
+                      </span>
+                    ))}
+                  </div>
                 )}
               </div>
             ))}
