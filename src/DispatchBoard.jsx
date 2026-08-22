@@ -475,7 +475,7 @@ export default function DispatchBoard() {
       (sum, e) => sum + (e.price != null ? e.price : calcPrice(e.units)),
       0
     );
-    const summary = `\n總計,人頭次,${totalCount}\n總計,時數,${totalTimeLabel}\n總計,金額,NT$${totalRevenue}`;
+    const summary = `\n總計,人頭次,${totalCount}\n總計,金額,NT$${totalRevenue}`;
     const csv = "\uFEFF" + header + rows + subtotalRow + summary;
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
@@ -559,10 +559,6 @@ export default function DispatchBoard() {
             <div>
               <div className="font-mono-num text-2xl font-semibold">{totalCount}</div>
               <div className="text-sm" style={{ color: C.textMuted }}>今日人頭次</div>
-            </div>
-            <div>
-              <div className="font-mono-num text-2xl font-semibold">{totalTimeLabel}</div>
-              <div className="text-sm" style={{ color: C.textMuted }}>今日時數</div>
             </div>
           </div>
           <div className="flex gap-2">
