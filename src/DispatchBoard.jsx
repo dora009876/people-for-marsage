@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import {
   Plus,
-  RotateCcw,
   Pencil,
   Check,
   Download,
@@ -51,6 +50,7 @@ const C = {
   panelBorder: "#E4E7EB",
   chipBg: "#EEF0F3",
   chipBgHover: "#E4E7EB",
+  chipBorder: "#C7CDD6",
   chipText: "#4B5563",
   inputBg: "#FFFFFF",
 
@@ -264,6 +264,19 @@ export default function DispatchBoard() {
     );
   }, []);
 
+  const undoUnit = useCallback((id) => {
+    setSlots((prev) =>
+      prev.map((s) => {
+        if (s.id !== id || !s.active || s.cycleMinutes <= 0 || !s.readyAt) return s;
+        const newCycleMinutes = s.cycleMinutes - 10;
+        if (newCycleMinutes <= 0) {
+          return { ...s, readyAt: null, cycleMinutes: 0 };
+        }
+        return { ...s, readyAt: s.readyAt - UNIT_MS, cycleMinutes: newCycleMinutes };
+      })
+    );
+  }, []);
+
   const toggleActive = useCallback((id) => {
     setSlots((prev) =>
       prev.map((s) => {
@@ -439,7 +452,7 @@ export default function DispatchBoard() {
       <div className="max-w-3xl mx-auto px-4 py-6">
         {/* Header */}
         <div className="flex items-baseline justify-between mb-1">
-          <h1 className="text-2xl font-semibold tracking-tight">林老闆專用計時器</h1>
+          <h1 className="text-2xl font-semibold tracking-tight">接單看板</h1>
           <span className="font-mono-num text-base" style={{ color: C.textMuted }}>
             {readyCount}/{activeSlots.length} 可接單
           </span>
@@ -467,7 +480,7 @@ export default function DispatchBoard() {
             <button
               onClick={exportCsv}
               className="flex items-center gap-1 rounded-lg active:scale-95 transition-all px-3 py-2 text-sm font-medium"
-              style={{ backgroundColor: C.chipBg, color: C.text }}
+              style={{ backgroundColor: C.chipBg, color: C.text, border: `1px solid ${C.chipBorder}` }}
             >
               <Download size={13} />
               匯出CSV
@@ -475,7 +488,7 @@ export default function DispatchBoard() {
             <button
               onClick={clearLog}
               className="rounded-lg active:scale-95 transition-all px-3 py-2 text-sm font-medium"
-              style={{ backgroundColor: C.chipBg, color: C.chipText }}
+              style={{ backgroundColor: C.chipBg, color: C.chipText, border: `1px solid ${C.chipBorder}` }}
               title="清空今日紀錄"
             >
               歸零
@@ -579,7 +592,7 @@ export default function DispatchBoard() {
                       style={{ backgroundColor: C.panelBg, color: C.textMuted }}
                       title="今日這個人頭已完成的人數・分鐘數"
                     >
-                      今日已完成 {slotCount} 人・{slotMinutes} 分
+                      今日 {slotCount} 人・{slotMinutes} 分
                     </span>
                     <button
                       onClick={() => toggleActive(slot.id)}
@@ -645,20 +658,30 @@ export default function DispatchBoard() {
                   <button
                     onClick={() => addUnit(slot.id)}
                     className="flex-1 flex items-center justify-center gap-2 rounded-lg active:scale-95 transition-all py-3.5 text-lg font-medium"
-                    style={{ backgroundColor: C.chipBg, color: C.text }}
+                    style={{ backgroundColor: C.chipBg, color: C.text, border: `1px solid ${C.chipBorder}` }}
                   >
                     <Plus size={18} />
                     10分鐘
                   </button>
                   {!isReady && (
-                    <button
-                      onClick={() => resetSlot(slot.id)}
-                      className="rounded-lg active:scale-95 transition-all px-4"
-                      style={{ backgroundColor: C.chipBg, color: C.text }}
-                      title="重置為可接單"
-                    >
-                      <RotateCcw size={18} />
-                    </button>
+                    <>
+                      <button
+                        onClick={() => undoUnit(slot.id)}
+                        className="rounded-lg active:scale-95 transition-all px-4 text-base font-medium whitespace-nowrap"
+                        style={{ backgroundColor: C.chipBg, color: C.text, border: `1px solid ${C.chipBorder}` }}
+                        title="退回上一個10分鐘單位"
+                      >
+                        上一步
+                      </button>
+                      <button
+                        onClick={() => resetSlot(slot.id)}
+                        className="rounded-lg active:scale-95 transition-all px-4 text-base font-medium whitespace-nowrap"
+                        style={{ backgroundColor: C.chipBg, color: C.text, border: `1px solid ${C.chipBorder}` }}
+                        title="重置為可接單"
+                      >
+                        歸零
+                      </button>
+                    </>
                   )}
                 </div>
               </div>
@@ -697,7 +720,7 @@ export default function DispatchBoard() {
                     style={{
                       backgroundColor: selected ? activeColor : C.chipBg,
                       color: selected ? activeText : C.chipText,
-                      borderColor: selected ? "rgba(255,255,255,0.35)" : "transparent",
+                      borderColor: selected ? "rgba(255,255,255,0.35)" : C.chipBorder,
                       transform: selected ? "scale(1.04)" : "scale(1)",
                       boxShadow: selected
                         ? g === "女"
@@ -756,7 +779,7 @@ export default function DispatchBoard() {
                   style={
                     newAssignedSlotId === null
                       ? { backgroundColor: C.assign, color: C.assignText, borderColor: "#E3CFFF" }
-                      : { backgroundColor: C.chipBg, color: C.chipText, borderColor: "transparent" }
+                      : { backgroundColor: C.chipBg, color: C.chipText, borderColor: C.chipBorder }
                   }
                 >
                   不指定
@@ -771,7 +794,7 @@ export default function DispatchBoard() {
                       style={{
                         ...(picked
                           ? { backgroundColor: C.assign, color: C.assignText, borderColor: "#E3CFFF" }
-                          : { backgroundColor: C.chipBg, color: C.chipText, borderColor: "transparent" }),
+                          : { backgroundColor: C.chipBg, color: C.chipText, borderColor: C.chipBorder }),
                         opacity: s.active ? 1 : 0.55,
                       }}
                     >
@@ -786,7 +809,7 @@ export default function DispatchBoard() {
             <button
               onClick={addToQueue}
               className="w-full flex items-center justify-center gap-1 rounded-lg active:scale-95 transition-all py-2 text-base font-medium"
-              style={{ backgroundColor: C.chipBg, color: C.text }}
+              style={{ backgroundColor: C.chipBg, color: C.text, border: `1px solid ${C.chipBorder}` }}
             >
               <UserPlus size={14} />
               加入名單
@@ -884,7 +907,7 @@ export default function DispatchBoard() {
                 className="rounded-lg px-3 py-2.5 flex flex-col items-center"
                 style={{
                   backgroundColor: stat.active ? C.chipBg : C.offlineBg,
-                  border: stat.active ? "none" : `1px solid ${C.offlineBorder}`,
+                  border: `1px solid ${stat.active ? C.chipBorder : C.offlineBorder}`,
                 }}
               >
                 <span className="text-sm truncate max-w-full" style={{ color: C.chipText }}>
@@ -947,7 +970,7 @@ export default function DispatchBoard() {
                   {assignedCustomer && (
                     <span
                       className="text-xs font-medium px-2 py-1 rounded-full flex-shrink-0 whitespace-nowrap"
-                      style={{ backgroundColor: C.chipBg, color: C.chipText }}
+                      style={{ backgroundColor: C.chipBg, color: C.chipText, border: `1px solid ${C.chipBorder}` }}
                       title="這個人頭還有顧客指定給他，記得上線後處理"
                     >
                       有顧客等待
@@ -967,7 +990,7 @@ export default function DispatchBoard() {
                     <button
                       onClick={() => toggleActive(slot.id)}
                       className="flex items-center gap-1 rounded-lg px-3 py-1.5 text-sm font-medium"
-                      style={{ backgroundColor: C.chipBg, color: C.text }}
+                      style={{ backgroundColor: C.chipBg, color: C.text, border: `1px solid ${C.chipBorder}` }}
                     >
                       <Power size={12} />
                       上線
