@@ -10,10 +10,14 @@ import {
   Undo2,
   Sun,
   Moon,
+  Share2,
+  History,
+  ChevronDown,
 } from "lucide-react";
 
 // 這個 App 原本是在 Claude Artifact 環境裡用 window.storage 存資料，
 // 部署到 Vercel 後改用瀏覽器的 localStorage 達到一樣的「重新整理資料還在」效果。
+// list() 額外實作 key 前綴查詢，用來支援「歷史紀錄」功能列出過去有資料的日期。
 const storage = {
   async get(key) {
     try {
@@ -27,6 +31,14 @@ const storage = {
     try {
       window.localStorage.setItem(key, value);
       return { key, value };
+    } catch (e) {
+      return null;
+    }
+  },
+  async list(prefix) {
+    try {
+      const keys = Object.keys(window.localStorage).filter((k) => k.startsWith(prefix));
+      return { keys };
     } catch (e) {
       return null;
     }
@@ -54,6 +66,102 @@ const UNIT_OPTIONS = [
 const PRICE_MAP = { 15: 200, 10: 100 };
 function calcPrice(units) {
   return (units || []).reduce((sum, u) => sum + (PRICE_MAP[u] || 0), 0);
+}
+
+// 依一天的完整紀錄（log 陣列）組出跟畫面上「各編號今日接待人數」一致的表格式 CSV 內容。
+// 用 log 裡存的 slotName（完成當下的名字），不依賴目前的 slots，這樣歷史紀錄也能正確還原。
+function buildCsvContent(logData) {
+  const slotNames = [];
+  const bySlot = {};
+  logData.forEach((e) => {
+    if (!bySlot[e.slotName]) {
+      bySlot[e.slotName] = [];
+      slotNames.push(e.slotName);
+    }
+    bySlot[e.slotName].push(e);
+  });
+  slotNames.forEach((name) => bySlot[name].sort((a, b) => a.time - b.time));
+  const maxRows = Math.max(0, ...slotNames.map((n) => bySlot[n].length));
+
+  const header = "," + slotNames.join(",") + "\n";
+  let rows = "";
+  for (let i = 0; i < maxRows; i++) {
+    const rowCells = slotNames.map((n) => {
+      const e = bySlot[n][i];
+      if (!e) return "";
+      const price = e.price != null ? e.price : calcPrice(e.units);
+      return `${price}元`;
+    });
+    rows += `${i + 1},${rowCells.join(",")}\n`;
+  }
+
+  const subtotalCells = slotNames.map((n) => {
+    const total = bySlot[n].reduce(
+      (sum, e) => sum + (e.price != null ? e.price : calcPrice(e.units)),
+      0
+    );
+    return `${total}元`;
+  });
+  const subtotalRow = `小計,${subtotalCells.join(",")}\n`;
+
+  const totalCountValue = logData.length;
+  const totalRevenueValue = logData.reduce(
+    (sum, e) => sum + (e.price != null ? e.price : calcPrice(e.units)),
+    0
+  );
+  const summary = `\n總計,人頭次,${totalCountValue}\n總計,金額,NT$${totalRevenueValue}`;
+  return "\uFEFF" + header + rows + subtotalRow + summary;
+}
+
+function downloadCsvContent(content, filename) {
+  const blob = new Blob([content], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+// 用瀏覽器原生的分享功能把 CSV 檔案交給使用者選擇的 App（Mail、LINE、AirDrop...）。
+// mailto 連結本身沒辦法夾帶附件，所以真正能「附檔寄送」只有這個方式；
+// 回傳 false 代表使用者的瀏覽器/裝置不支援，或使用者取消了分享，這時該改用一般下載。
+async function shareCsvContent(content, filename) {
+  try {
+    const blob = new Blob([content], { type: "text/csv;charset=utf-8;" });
+    const file = new File([blob], filename, { type: "text/csv" });
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      await navigator.share({ files: [file], title: filename });
+      return true;
+    }
+  } catch (e) {
+    // 使用者取消分享，或裝置不支援，交給呼叫端改用下載
+  }
+  return false;
+}
+
+// 把一天的 log 陣列整理成「各編號今日接待人數」畫面用得到的摘要，歷史紀錄查詢時使用
+function summarizeLog(logData) {
+  const order = [];
+  const bySlot = {};
+  logData.forEach((e) => {
+    if (!bySlot[e.slotName]) {
+      bySlot[e.slotName] = { count: 0, revenue: 0 };
+      order.push(e.slotName);
+    }
+    const price = e.price != null ? e.price : calcPrice(e.units);
+    bySlot[e.slotName].count += 1;
+    bySlot[e.slotName].revenue += price;
+  });
+  const totalCount = logData.length;
+  const totalRevenue = order.reduce((sum, n) => sum + bySlot[n].revenue, 0);
+  return {
+    totalCount,
+    totalRevenue,
+    perSlot: order.map((n) => ({ name: n, ...bySlot[n] })),
+  };
 }
 
 // 全站顏色統一在這裡管理，畫面上一律用 inline style 套用，
@@ -206,6 +314,13 @@ export default function DispatchBoard() {
   const clockOutConfirmTimeoutRef = useRef(null);
   const [clockOutAllConfirm, setClockOutAllConfirm] = useState(false); // 正在等待第二次確認「一鍵全下班」
   const clockOutAllConfirmTimeoutRef = useRef(null);
+  const [clearLogConfirm, setClearLogConfirm] = useState(false); // 正在等待第二次確認「清空今日紀錄」
+  const clearLogConfirmTimeoutRef = useRef(null);
+  const [historyOpen, setHistoryOpen] = useState(false); // 歷史紀錄面板是否展開
+  const [historyDays, setHistoryDays] = useState(null); // 有資料的日期清單（null=尚未載入過）
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyDayData, setHistoryDayData] = useState({}); // 快取：{日期: log陣列}
+  const [selectedHistoryDay, setSelectedHistoryDay] = useState(null);
   const [expandedIds, setExpandedIds] = useState(() => new Set()); // 精簡橫列中，被點開顯示完整操作的人頭id
   const [sortMode, setSortMode] = useState("activation"); // "activation" = 上班順序, "finish" = 結束順序
   const loadedRef = useRef(false);
@@ -635,43 +750,72 @@ export default function DispatchBoard() {
   }, [slots, log]);
 
   const exportCsv = () => {
-    // 每個編號各自的金額清單，依完成時間先後排序（第1單、第2單...）
-    const perSlotPrices = slots.map((s) => {
-      const entries = log
-        .filter((e) => e.slotId === s.id)
-        .slice()
-        .sort((a, b) => a.time - b.time);
-      return entries.map((e) => (e.price != null ? e.price : calcPrice(e.units)));
-    });
-    const maxRows = Math.max(0, ...perSlotPrices.map((arr) => arr.length));
-
-    const header = "," + slots.map((s) => s.name).join(",") + "\n";
-    let rows = "";
-    for (let i = 0; i < maxRows; i++) {
-      const rowCells = perSlotPrices.map((arr) => (arr[i] != null ? `${arr[i]}元` : ""));
-      rows += `${i + 1},${rowCells.join(",")}\n`;
-    }
-
-    // 個人小計：每個編號當天的總金額
-    const subtotalCells = perSlotPrices.map(
-      (arr) => `${arr.reduce((sum, p) => sum + p, 0)}元`
-    );
-    const subtotalRow = `小計,${subtotalCells.join(",")}\n`;
-
-    const summary = `\n總計,人頭次,${totalCount}\n總計,金額,NT$${totalRevenue}`;
-    const csv = "\uFEFF" + header + rows + subtotalRow + summary;
-    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `來客登記表_${dayKey}.csv`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+    const csv = buildCsvContent(log);
+    downloadCsvContent(csv, `來客登記表_${dayKey}.csv`);
   };
 
-  const clearLog = () => setLog([]);
+  const shareTodayCsv = async () => {
+    const csv = buildCsvContent(log);
+    const filename = `來客登記表_${dayKey}.csv`;
+    const shared = await shareCsvContent(csv, filename);
+    if (!shared) {
+      // 裝置不支援分享，或使用者取消了，改用一般下載
+      downloadCsvContent(csv, filename);
+    }
+  };
+
+  // 清空今日紀錄需要按兩次確認：這會把今日人頭次、總收入、應收金額全部歸零，
+  // 影響範圍是整天的資料，比單一人頭的歸零更嚴重，一樣需要防呆。
+  const clearLog = () => {
+    if (clearLogConfirmTimeoutRef.current) {
+      clearTimeout(clearLogConfirmTimeoutRef.current);
+      clearLogConfirmTimeoutRef.current = null;
+    }
+    setClearLogConfirm((prev) => {
+      if (prev) {
+        setLog([]);
+        return false;
+      }
+      clearLogConfirmTimeoutRef.current = setTimeout(() => {
+        setClearLogConfirm(false);
+      }, 3000);
+      return true;
+    });
+  };
+
+  // 找出目前存有紀錄的所有日期（不含今天，今天已經即時顯示在上面了）
+  const toggleHistory = async () => {
+    const willOpen = !historyOpen;
+    setHistoryOpen(willOpen);
+    if (willOpen && historyDays === null) {
+      setHistoryLoading(true);
+      try {
+        const result = await storage.list(LOG_KEY_PREFIX, false);
+        const keys = (result && result.keys) || [];
+        const days = keys
+          .map((k) => k.replace(LOG_KEY_PREFIX, ""))
+          .filter((d) => d && d !== dayKey)
+          .sort((a, b) => (a < b ? 1 : -1)); // 新到舊
+        setHistoryDays(days);
+      } catch (e) {
+        setHistoryDays([]);
+      }
+      setHistoryLoading(false);
+    }
+  };
+
+  const openHistoryDay = async (day) => {
+    if (!historyDayData[day]) {
+      try {
+        const result = await storage.get(LOG_KEY_PREFIX + day, false);
+        const parsed = result && result.value ? JSON.parse(result.value) : [];
+        setHistoryDayData((prev) => ({ ...prev, [day]: parsed }));
+      } catch (e) {
+        setHistoryDayData((prev) => ({ ...prev, [day]: [] }));
+      }
+    }
+    setSelectedHistoryDay((prev) => (prev === day ? null : day));
+  };
 
   const addToQueue = () => {
     setQueue((prev) => [
@@ -752,25 +896,141 @@ export default function DispatchBoard() {
               <div className="text-sm" style={{ color: C.textMuted }}>應收金額（25%）</div>
             </div>
           </div>
-          <div className="flex gap-2">
+          <div className="flex gap-2 flex-wrap">
             <button
               onClick={exportCsv}
               className="flex items-center gap-1 rounded-lg active:scale-95 transition-all px-3 py-2 text-sm font-medium"
               style={{ backgroundColor: C.chipBg, color: C.text, border: `1px solid ${C.chipBorder}` }}
             >
               <Download size={13} />
-              匯出CSV
+              下載CSV
+            </button>
+            <button
+              onClick={shareTodayCsv}
+              className="flex items-center gap-1 rounded-lg active:scale-95 transition-all px-3 py-2 text-sm font-medium"
+              style={{ backgroundColor: C.chipBg, color: C.text, border: `1px solid ${C.chipBorder}` }}
+              title="用手機/電腦的分享功能寄送或傳送 CSV"
+            >
+              <Share2 size={13} />
+              分享/寄送
+            </button>
+            <button
+              onClick={toggleHistory}
+              className="flex items-center gap-1 rounded-lg active:scale-95 transition-all px-3 py-2 text-sm font-medium"
+              style={{ backgroundColor: C.chipBg, color: C.text, border: `1px solid ${C.chipBorder}` }}
+            >
+              <History size={13} />
+              歷史紀錄
+              <ChevronDown
+                size={13}
+                style={{ transform: historyOpen ? "rotate(180deg)" : "none", transition: "transform 0.2s" }}
+              />
             </button>
             <button
               onClick={clearLog}
               className="rounded-lg active:scale-95 transition-all px-3 py-2 text-sm font-medium"
-              style={{ backgroundColor: C.chipBg, color: C.chipText, border: `1px solid ${C.chipBorder}` }}
-              title="清空今日紀錄"
+              style={
+                clearLogConfirm
+                  ? { backgroundColor: C.urgentBg, color: C.urgentText, border: `1px solid ${C.urgentBorder}` }
+                  : { backgroundColor: C.chipBg, color: C.chipText, border: `1px solid ${C.chipBorder}` }
+              }
+              title="清空今日紀錄（需要按兩次確認）"
             >
-              歸零
+              {clearLogConfirm ? "確定歸零？" : "歸零"}
             </button>
           </div>
         </div>
+
+        {/* 歷史紀錄面板 */}
+        {historyOpen && (
+          <div
+            className="rounded-xl border p-4 mb-5"
+            style={{ backgroundColor: C.panelBg, borderColor: C.panelBorder }}
+          >
+            {historyLoading ? (
+              <p className="text-sm" style={{ color: C.textMuted }}>載入中…</p>
+            ) : historyDays && historyDays.length === 0 ? (
+              <p className="text-sm" style={{ color: C.textMuted }}>
+                目前沒有過去的紀錄（只有今天的資料）
+              </p>
+            ) : (
+              <div className="space-y-2">
+                {(historyDays || []).map((day) => {
+                  const isOpen = selectedHistoryDay === day;
+                  const dayLog = historyDayData[day];
+                  const summary = dayLog ? summarizeLog(dayLog) : null;
+                  return (
+                    <div key={day}>
+                      <button
+                        onClick={() => openHistoryDay(day)}
+                        className="w-full flex items-center justify-between rounded-lg px-3 py-2.5 text-base font-medium"
+                        style={{ backgroundColor: C.chipBg, color: C.text, border: `1px solid ${C.chipBorder}` }}
+                      >
+                        <span>{day}</span>
+                        <span className="flex items-center gap-2">
+                          {summary && (
+                            <span className="text-sm" style={{ color: C.textMuted }}>
+                              {summary.totalCount}人次・NT${summary.totalRevenue}
+                            </span>
+                          )}
+                          <ChevronDown
+                            size={16}
+                            style={{ transform: isOpen ? "rotate(180deg)" : "none", transition: "transform 0.2s" }}
+                          />
+                        </span>
+                      </button>
+
+                      {isOpen && summary && (
+                        <div
+                          className="rounded-lg px-3 py-3 mt-1"
+                          style={{ backgroundColor: C.page, border: `1px solid ${C.panelBorder}` }}
+                        >
+                          {summary.perSlot.length === 0 ? (
+                            <p className="text-sm" style={{ color: C.textFaint }}>這天沒有紀錄</p>
+                          ) : (
+                            <div className="space-y-1.5 mb-3">
+                              {summary.perSlot.map((s) => (
+                                <div key={s.name} className="flex items-center justify-between text-sm">
+                                  <span style={{ color: C.text }}>{s.name}</span>
+                                  <span style={{ color: C.textMuted }}>
+                                    {s.count} 人次・NT${s.revenue}
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                          <div className="flex gap-2">
+                            <button
+                              onClick={() => downloadCsvContent(buildCsvContent(dayLog), `來客登記表_${day}.csv`)}
+                              className="flex items-center gap-1 rounded-lg px-3 py-1.5 text-sm font-medium"
+                              style={{ backgroundColor: C.chipBg, color: C.text, border: `1px solid ${C.chipBorder}` }}
+                            >
+                              <Download size={12} />
+                              下載CSV
+                            </button>
+                            <button
+                              onClick={async () => {
+                                const csv = buildCsvContent(dayLog);
+                                const filename = `來客登記表_${day}.csv`;
+                                const shared = await shareCsvContent(csv, filename);
+                                if (!shared) downloadCsvContent(csv, filename);
+                              }}
+                              className="flex items-center gap-1 rounded-lg px-3 py-1.5 text-sm font-medium"
+                              style={{ backgroundColor: C.chipBg, color: C.text, border: `1px solid ${C.chipBorder}` }}
+                            >
+                              <Share2 size={12} />
+                              分享/寄送
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
 
         {/* 排序切換 + 一鍵全下班 */}
         <div className="flex items-center justify-between gap-2 mb-3 flex-wrap">
