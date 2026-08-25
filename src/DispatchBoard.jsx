@@ -37,7 +37,7 @@ const storage = {
 // 測試模式開關：平常正式使用請保持 60 * 1000（代表 1 分鐘 = 60 秒）。
 // 想快速測試時，把下面這一行改成 1000（1 分鐘 = 1 秒，方便快速測試倒數/完成邏輯），
 // 測完記得改回 60 * 1000，並按畫面上的「歸零」清掉測試產生的假紀錄，避免跟正式資料混在一起。
-const MINUTE_MS =  1000; // ← 測試時把這裡改成 1000，測完改回 60 * 1000
+const MINUTE_MS = 60 * 1000; // ← 測試時把這裡改成 1000，測完改回 60 * 1000
 // ============================================
 
 const URGENT_MS = 5 * MINUTE_MS; // 5 分鐘內 = 緊急
@@ -664,7 +664,7 @@ export default function DispatchBoard() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `接單紀錄_${dayKey}.csv`;
+    a.download = `來客登記表_${dayKey}.csv`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -925,9 +925,30 @@ export default function DispatchBoard() {
                     >
                       {slot.name}
                     </div>
-                    <div className="text-sm truncate" style={{ color: C.textMuted }}>
-                      {statusLabel}
-                    </div>
+                    {assignedCustomer ? (
+                      <div className="flex items-center gap-1.5 mt-0.5">
+                        <span
+                          className="w-3.5 h-3.5 rounded-full flex-shrink-0"
+                          style={{ backgroundColor: assignedCustomer.color }}
+                        />
+                        <span
+                          className="text-xs font-bold px-1.5 py-0.5 rounded-full flex-shrink-0"
+                          style={{
+                            backgroundColor: assignedCustomer.gender === "女" ? C.female : C.male,
+                            color: assignedCustomer.gender === "女" ? C.femaleText : C.maleText,
+                          }}
+                        >
+                          {assignedCustomer.gender}
+                        </span>
+                        <span className="text-sm font-medium truncate" style={{ color: C.textMuted }}>
+                          {assignedCustomer.note || "服務中"}
+                        </span>
+                      </div>
+                    ) : (
+                      <div className="text-sm truncate" style={{ color: C.textMuted }}>
+                        {statusLabel}
+                      </div>
+                    )}
                   </div>
 
                   <div className="flex items-baseline flex-shrink-0">
