@@ -5,10 +5,11 @@ import {
   Check,
   Download,
   Zap,
-  Power,
   X,
   UserPlus,
   Undo2,
+  Sun,
+  Moon,
 } from "lucide-react";
 
 // 這個 App 原本是在 Claude Artifact 環境裡用 window.storage 存資料，
@@ -36,7 +37,7 @@ const storage = {
 // 測試模式開關：平常正式使用請保持 60 * 1000（代表 1 分鐘 = 60 秒）。
 // 想快速測試時，把下面這一行改成 1000（1 分鐘 = 1 秒，方便快速測試倒數/完成邏輯），
 // 測完記得改回 60 * 1000，並按畫面上的「歸零」清掉測試產生的假紀錄，避免跟正式資料混在一起。
-const MINUTE_MS =  1000; // ← 測試時把這裡改成 1000，測完改回 60 * 1000
+const MINUTE_MS = 60 * 1000; // ← 測試時把這裡改成 1000，測完改回 60 * 1000
 // ============================================
 
 const URGENT_MS = 5 * MINUTE_MS; // 5 分鐘內 = 緊急
@@ -104,6 +105,11 @@ const C = {
 
   assign: "#EDE4FF",
   assignText: "#5B21B6",
+
+  clockInBg: "#316666",
+  clockInText: "#FFFFFF",
+  clockOutBg: "#E4E7EB",
+  clockOutText: "#4B5563",
 };
 
 const COLOR_SWATCHES = [
@@ -134,6 +140,7 @@ function defaultSlots() {
     cycleMinutes: 0,
     unitHistory: [], // 這一輪依序按過的單位（例如 [15, 15, 10]），用來支援「上一步」跟精準計費
     active: true, // 是否今日上線接單
+    activationOrder: i + 1, // 今天上班的先後順序（越小越早），一開始依編號排，之後每次開台會更新
     savedRemainingMs: null, // 不小心關台時，暫存當下還剩多少毫秒
     savedCycleMinutes: 0,
     savedUnitHistory: [],
@@ -158,6 +165,26 @@ function ordinalLabel(rank) {
   return `第${word}結束`;
 }
 
+// 依排序模式排列人頭清單的純函式（不含釘選邏輯），toggleExpand 跟 sortedOnlineSlots 共用
+function computeSortedSlots(list, sortMode, now) {
+  const arr = [...list];
+  if (sortMode === "activation") {
+    arr.sort((a, b) => (a.activationOrder || a.id) - (b.activationOrder || b.id));
+  } else {
+    arr.sort((a, b) => {
+      const aReady = !a.readyAt || a.readyAt <= now;
+      const bReady = !b.readyAt || b.readyAt <= now;
+      if (aReady && !bReady) return -1;
+      if (!aReady && bReady) return 1;
+      if (aReady && bReady) {
+        return (a.activationOrder || a.id) - (b.activationOrder || b.id);
+      }
+      return a.readyAt - b.readyAt;
+    });
+  }
+  return arr;
+}
+
 export default function DispatchBoard() {
   const [slots, setSlots] = useState(defaultSlots());
   const [now, setNow] = useState(Date.now());
@@ -171,6 +198,12 @@ export default function DispatchBoard() {
   const [newNote, setNewNote] = useState("");
   const [newAssignedSlotId, setNewAssignedSlotId] = useState(null);
   const [resetConfirmId, setResetConfirmId] = useState(null); // 正在等待第二次確認歸零的人頭id
+  const [clockOutConfirmId, setClockOutConfirmId] = useState(null); // 正在等待第二次確認下班的人頭id
+  const clockOutConfirmTimeoutRef = useRef(null);
+  const [clockOutAllConfirm, setClockOutAllConfirm] = useState(false); // 正在等待第二次確認「一鍵全下班」
+  const clockOutAllConfirmTimeoutRef = useRef(null);
+  const [expandedIds, setExpandedIds] = useState(() => new Set()); // 精簡橫列中，被點開顯示完整操作的人頭id
+  const [sortMode, setSortMode] = useState("activation"); // "activation" = 上班順序, "finish" = 結束順序
   const loadedRef = useRef(false);
   const resetConfirmTimeoutRef = useRef(null);
   const dayKey = useMemo(() => todayKey(), []);
@@ -183,10 +216,11 @@ export default function DispatchBoard() {
           const parsed = JSON.parse(result.value);
           if (Array.isArray(parsed) && parsed.length === SLOT_COUNT) {
             setSlots(
-              parsed.map((s) => ({
+              parsed.map((s, idx) => ({
                 cycleMinutes: 0,
                 unitHistory: [],
                 active: true,
+                activationOrder: idx + 1,
                 savedRemainingMs: null,
                 savedCycleMinutes: 0,
                 savedUnitHistory: [],
@@ -340,30 +374,98 @@ export default function DispatchBoard() {
     );
   }, []);
 
-  const toggleActive = useCallback((id) => {
+  const handleClockOut = useCallback((id) => {
     setSlots((prev) =>
       prev.map((s) => {
-        if (s.id !== id) return s;
-        if (s.active) {
-          // 關台：如果當下正在冷卻中，先暫存剩餘時間跟單位組成，之後可以馬上復原
-          const remaining = s.readyAt ? s.readyAt - Date.now() : 0;
-          const hasRunningTimer = remaining > 0;
-          return {
-            ...s,
-            active: false,
-            readyAt: null,
-            cycleMinutes: 0,
-            unitHistory: [],
-            savedRemainingMs: hasRunningTimer ? remaining : null,
-            savedCycleMinutes: hasRunningTimer ? s.cycleMinutes : 0,
-            savedUnitHistory: hasRunningTimer ? s.unitHistory : [],
-          };
-        }
-        // 一般開台（非復原）：從「可接單」重新開始，不動用暫存的計時
-        return { ...s, active: true };
+        if (s.id !== id || !s.active) return s;
+        // 下班：如果當下正在冷卻中，先暫存剩餘時間跟單位組成，之後可以馬上復原
+        const remaining = s.readyAt ? s.readyAt - Date.now() : 0;
+        const hasRunningTimer = remaining > 0;
+        return {
+          ...s,
+          active: false,
+          readyAt: null,
+          cycleMinutes: 0,
+          unitHistory: [],
+          savedRemainingMs: hasRunningTimer ? remaining : null,
+          savedCycleMinutes: hasRunningTimer ? s.cycleMinutes : 0,
+          savedUnitHistory: hasRunningTimer ? s.unitHistory : [],
+        };
       })
     );
   }, []);
+
+  const handleClockIn = useCallback((id) => {
+    setSlots((prev) =>
+      prev.map((s) => {
+        if (s.id !== id || s.active) return s;
+        // 上班（非復原）：從「可接單」重新開始，不動用暫存的計時
+        // 記錄這次上班的順序（比目前所有人都晚，代表「這次點的算最後上班」）
+        const maxOrder = Math.max(SLOT_COUNT, ...prev.map((p) => p.activationOrder || 0));
+        return { ...s, active: true, activationOrder: maxOrder + 1 };
+      })
+    );
+  }, []);
+
+  // 下班需要按兩次才會真的執行：第一次按下變成「確定下班？」，3秒內沒再按就自動取消。
+  // 因為下班會把人移到未上線清單，還可能打亂原本排好的上班順序，容易誤觸的代價比較大，需要防呆。
+  const handleClockOutClick = useCallback(
+    (id) => {
+      if (clockOutConfirmTimeoutRef.current) {
+        clearTimeout(clockOutConfirmTimeoutRef.current);
+        clockOutConfirmTimeoutRef.current = null;
+      }
+      setClockOutConfirmId((prevId) => {
+        if (prevId === id) {
+          handleClockOut(id);
+          return null;
+        }
+        clockOutConfirmTimeoutRef.current = setTimeout(() => {
+          setClockOutConfirmId(null);
+        }, 3000);
+        return id;
+      });
+    },
+    [handleClockOut]
+  );
+
+  const handleClockOutAll = useCallback(() => {
+    setSlots((prev) =>
+      prev.map((s) => {
+        if (!s.active) return s;
+        const remaining = s.readyAt ? s.readyAt - Date.now() : 0;
+        const hasRunningTimer = remaining > 0;
+        return {
+          ...s,
+          active: false,
+          readyAt: null,
+          cycleMinutes: 0,
+          unitHistory: [],
+          savedRemainingMs: hasRunningTimer ? remaining : null,
+          savedCycleMinutes: hasRunningTimer ? s.cycleMinutes : 0,
+          savedUnitHistory: hasRunningTimer ? s.unitHistory : [],
+        };
+      })
+    );
+  }, []);
+
+  // 一鍵全下班一樣需要按兩次確認，因為會一次影響所有上線中的人頭
+  const handleClockOutAllClick = useCallback(() => {
+    if (clockOutAllConfirmTimeoutRef.current) {
+      clearTimeout(clockOutAllConfirmTimeoutRef.current);
+      clockOutAllConfirmTimeoutRef.current = null;
+    }
+    setClockOutAllConfirm((prev) => {
+      if (prev) {
+        handleClockOutAll();
+        return false;
+      }
+      clockOutAllConfirmTimeoutRef.current = setTimeout(() => {
+        setClockOutAllConfirm(false);
+      }, 3000);
+      return true;
+    });
+  }, [handleClockOutAll]);
 
   const restoreSlot = useCallback((id) => {
     setSlots((prev) =>
@@ -382,6 +484,47 @@ export default function DispatchBoard() {
       })
     );
   }, []);
+
+  const pinnedIndexRef = useRef(null); // 記錄目前展開卡片被點開當下所在的排序位置
+  const idleCollapseTimeoutRef = useRef(null); // 閒置太久自動收合的計時器
+
+  // 展開的卡片如果超過10秒沒有任何動作（沒按+15/+10/上一步/歸零），就自動收合、自動歸隊排序，
+  // 這樣就算忘記手動收合，也不會一直卡在釘選狀態。每次按按鈕都會重新倒數10秒。
+  const scheduleAutoCollapse = useCallback(() => {
+    if (idleCollapseTimeoutRef.current) {
+      clearTimeout(idleCollapseTimeoutRef.current);
+    }
+    idleCollapseTimeoutRef.current = setTimeout(() => {
+      pinnedIndexRef.current = null;
+      setExpandedIds(new Set());
+    }, 10000);
+  }, []);
+
+  const toggleExpand = useCallback(
+    (id) => {
+      if (expandedIds.has(id)) {
+        // 收合：清掉釘選跟閒置計時器
+        pinnedIndexRef.current = null;
+        if (idleCollapseTimeoutRef.current) {
+          clearTimeout(idleCollapseTimeoutRef.current);
+          idleCollapseTimeoutRef.current = null;
+        }
+        setExpandedIds(new Set());
+        return;
+      }
+      // 展開：記錄當下位置並釘選，同時啟動閒置自動收合的計時器
+      const liveSorted = computeSortedSlots(
+        slots.filter((s) => s.active),
+        sortMode,
+        now
+      );
+      const idx = liveSorted.findIndex((s) => s.id === id);
+      pinnedIndexRef.current = idx === -1 ? 0 : idx;
+      scheduleAutoCollapse();
+      setExpandedIds(new Set([id]));
+    },
+    [slots, sortMode, now, expandedIds, scheduleAutoCollapse]
+  );
 
   const startEdit = (slot) => {
     setEditingId(slot.id);
@@ -416,6 +559,22 @@ export default function DispatchBoard() {
   // 上線中的人頭顯示在主看板；未上線的沉到頁面最底部（顧客名單下方）
   const onlineSlots = useMemo(() => slots.filter((s) => s.active), [slots]);
   const offlineSlots = useMemo(() => slots.filter((s) => !s.active), [slots]);
+
+  // 依照目前選的排序模式排列上線中的人頭：
+  // 「上班順序」＝今天第一個點上班的排最前面；「結束順序」＝還有空位的排最前面，接著依剩餘時間由短到長排
+  // 正在展開操作的那張卡片會「釘選」在原本的位置不動，其他卡片還是會照最新時間即時重新排序，
+  // 這樣就算忘記收合，其餘卡片的順序也不會停止更新。
+  const pinnedSlotId = expandedIds.size === 1 ? Array.from(expandedIds)[0] : null;
+  const sortedOnlineSlots = useMemo(() => {
+    const liveSorted = computeSortedSlots(onlineSlots, sortMode, now);
+    if (pinnedSlotId == null) return liveSorted;
+    const pinnedItem = liveSorted.find((s) => s.id === pinnedSlotId);
+    if (!pinnedItem) return liveSorted;
+    const rest = liveSorted.filter((s) => s.id !== pinnedSlotId);
+    const insertAt = Math.min(pinnedIndexRef.current ?? 0, rest.length);
+    rest.splice(insertAt, 0, pinnedItem);
+    return rest;
+  }, [onlineSlots, sortMode, now, pinnedSlotId]);
 
   const totalCount = log.length;
   const totalRevenue = log.reduce(
@@ -488,7 +647,7 @@ export default function DispatchBoard() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `來客登記表_${dayKey}.csv`;
+    a.download = `接單紀錄_${dayKey}.csv`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -554,7 +713,7 @@ export default function DispatchBoard() {
           </span>
         </div>
         <p className="text-base mb-4" style={{ color: C.textFaint }}>
-          藍底 = 全部客滿時最快結束・紅底 = 剩不到5分鐘・電源鍵可關閉今日未上線人頭
+          藍底 = 全部客滿時最快結束・紅底 = 剩不到5分鐘・按「下班」可關閉今日未上線人頭
         </p>
 
         {/* 今日統計條 */}
@@ -596,9 +755,52 @@ export default function DispatchBoard() {
           </div>
         </div>
 
+        {/* 排序切換 + 一鍵全下班 */}
+        <div className="flex items-center justify-between gap-2 mb-3 flex-wrap">
+          <div className="flex items-center gap-2">
+            <span className="text-sm" style={{ color: C.textMuted }}>排序：</span>
+            {[
+              { key: "activation", label: "上班順序" },
+              { key: "finish", label: "結束順序" },
+            ].map((opt) => {
+              const selected = sortMode === opt.key;
+              return (
+                <button
+                  key={opt.key}
+                  onClick={() => setSortMode(opt.key)}
+                  className="rounded-lg px-3 py-1.5 text-sm font-medium"
+                  style={
+                    selected
+                      ? { backgroundColor: C.assign, color: C.assignText }
+                      : { backgroundColor: C.chipBg, color: C.chipText, border: `1px solid ${C.chipBorder}` }
+                  }
+                >
+                  {opt.label}
+                </button>
+              );
+            })}
+          </div>
+
+          {onlineSlots.length > 0 && (
+            <button
+              onClick={handleClockOutAllClick}
+              className="flex items-center gap-1 rounded-lg px-3 py-1.5 text-sm font-medium whitespace-nowrap"
+              style={
+                clockOutAllConfirm
+                  ? { backgroundColor: C.urgentBg, color: C.urgentText, border: `1px solid ${C.urgentBorder}` }
+                  : { backgroundColor: C.chipBg, color: C.chipText, border: `1px solid ${C.chipBorder}` }
+              }
+              title="把目前所有上線中的人頭一次下班（需要按兩次確認）"
+            >
+              <Moon size={13} />
+              {clockOutAllConfirm ? "確定全部下班？" : "一鍵全下班"}
+            </button>
+          )}
+        </div>
+
         {/* Grid */}
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-8">
-          {onlineSlots.map((slot) => {
+          {sortedOnlineSlots.map((slot) => {
             const remaining = slot.readyAt ? slot.readyAt - now : 0;
             const isReady = remaining <= 0;
             const isUrgent = !isReady && remaining <= URGENT_MS;
@@ -634,12 +836,19 @@ export default function DispatchBoard() {
             const assignedCustomer = queue.find((q) => q.assignedSlotId === slot.id);
             const slotLog = log.filter((e) => e.slotId === slot.id);
             const slotCount = slotLog.length;
-            const slotMinutes = slotLog.reduce((sum, e) => sum + e.minutes, 0);
+            const isExpanded = expandedIds.has(slot.id);
+            const minutesRemaining = isReady ? 0 : Math.floor(remaining / 60000);
+            const secondsRemaining = isReady ? 0 : Math.floor((remaining % 60000) / 1000);
+            const statusLabel = isReady
+              ? "可接單"
+              : assignedCustomer
+              ? `${assignedCustomer.gender}客人${assignedCustomer.note ? "・" + assignedCustomer.note : ""}`
+              : "服務中";
 
             return (
               <div
                 key={slot.id}
-                className={`relative rounded-2xl border p-6 flex flex-col gap-4 transition-colors duration-300 ${
+                className={`relative rounded-2xl border transition-colors duration-300 ${
                   isUrgent ? "urgent-pulse" : ""
                 }`}
                 style={{ backgroundColor: bgColor, borderColor: borderColor }}
@@ -666,160 +875,207 @@ export default function DispatchBoard() {
                   </div>
                 )}
 
-                {/* 狀態燈 + 名稱 + 上線開關 */}
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2.5 min-w-0">
-                    <span
-                      className="w-4 h-4 rounded-full flex-shrink-0"
-                      style={{ backgroundColor: dotColorHex }}
-                    />
-                    {editingId === slot.id ? (
-                      <input
-                        autoFocus
-                        value={draftName}
-                        onChange={(e) => setDraftName(e.target.value)}
-                        onBlur={() => commitEdit(slot.id)}
-                        onKeyDown={(e) => e.key === "Enter" && commitEdit(slot.id)}
-                        className="bg-transparent border-b text-xl font-medium w-24 outline-none"
-                        style={{ color: C.text, borderColor: C.textMuted }}
-                      />
+                {/* 精簡橫列：一眼看剩餘分鐘，點一下展開完整操作 */}
+                <div
+                  onClick={() => toggleExpand(slot.id)}
+                  className="px-5 py-4 flex items-center gap-4 cursor-pointer"
+                >
+                  <span
+                    className="w-11 h-11 rounded-full flex-shrink-0 flex items-center justify-center text-lg font-bold"
+                    style={{ backgroundColor: dotColorHex, color: "#FFFFFF" }}
+                  >
+                    {Array.from(slot.name || "")[0] || ""}
+                  </span>
+
+                  <div className="flex-1 min-w-0">
+                    <div
+                      className="text-xl font-semibold truncate"
+                      style={{ color: C.text }}
+                      title="上線中無法改名，下班後才能修改"
+                    >
+                      {slot.name}
+                    </div>
+                    <div className="text-sm truncate" style={{ color: C.textMuted }}>
+                      {statusLabel}
+                    </div>
+                  </div>
+
+                  <div className="flex items-baseline flex-shrink-0">
+                    {isReady ? (
+                      <span className="text-2xl font-bold" style={{ color: C.readyText }}>
+                        可接單
+                      </span>
                     ) : (
-                      <button
-                        onClick={() => startEdit(slot)}
-                        className="text-xl font-medium truncate flex items-center gap-1.5 group"
-                        style={{ color: C.text }}
-                      >
-                        {slot.name}
-                        <Pencil size={14} className="opacity-0 group-hover:opacity-40 flex-shrink-0" />
-                      </button>
+                      <>
+                        <span
+                          className="font-mono-num text-4xl font-bold tabular-nums"
+                          style={{ color: textColorHex }}
+                        >
+                          {minutesRemaining}
+                        </span>
+                        <span
+                          className="font-mono-num text-base ml-0.5 tabular-nums"
+                          style={{ color: textColorHex, opacity: 0.7 }}
+                        >
+                          :{String(secondsRemaining).padStart(2, "0")}
+                        </span>
+                      </>
                     )}
                   </div>
-                  <div className="flex items-center gap-2 flex-shrink-0">
+
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleClockOutClick(slot.id);
+                    }}
+                    className="flex items-center gap-1 rounded-lg px-3 py-2 text-sm font-medium whitespace-nowrap flex-shrink-0"
+                    style={
+                      clockOutConfirmId === slot.id
+                        ? { backgroundColor: C.urgentBg, color: C.urgentText, border: `1px solid ${C.urgentBorder}` }
+                        : { backgroundColor: C.clockOutBg, color: C.clockOutText }
+                    }
+                    title="下班（今日未上線，需要按兩次確認）"
+                  >
+                    <Moon size={13} />
+                    {clockOutConfirmId === slot.id ? "確定下班？" : "下班"}
+                  </button>
+                </div>
+
+                {/* 展開後的完整操作面板：跟上面橫列共用同一個外框，只用分隔線區隔 */}
+                {isExpanded && (
+                  <div
+                    className="px-6 pb-6 pt-4 flex flex-col gap-4"
+                    style={{ borderTop: `1px solid ${borderColor}` }}
+                  >
                     <span
-                      className="text-sm font-semibold px-2 py-1 rounded-full whitespace-nowrap"
+                      className="text-sm font-semibold px-2 py-1 rounded-full whitespace-nowrap self-start"
                       style={{ backgroundColor: C.panelBg, color: C.textMuted }}
                       title="今日這個人頭已完成的人數"
                     >
                       今日已完成 {slotCount} 人
                     </span>
-                    <button
-                      onClick={() => toggleActive(slot.id)}
-                      className="p-1.5 rounded-md"
-                      style={{ color: C.textMuted }}
-                      title="關閉此人頭（今日未上線）"
-                    >
-                      <Power size={18} />
-                    </button>
-                  </div>
-                </div>
 
-                {assignedCustomer && (
-                  <div
-                    className="flex items-center gap-2 -mt-1 rounded-lg px-3 py-2"
-                    style={{ backgroundColor: C.assign }}
-                  >
-                    <span
-                      className="w-3.5 h-3.5 rounded-full flex-shrink-0"
-                      style={{ backgroundColor: assignedCustomer.color }}
-                    />
-                    <span
-                      className="text-sm font-semibold px-1.5 py-0.5 rounded-full flex-shrink-0"
-                      style={{
-                        backgroundColor: assignedCustomer.gender === "女" ? C.female : C.male,
-                        color: assignedCustomer.gender === "女" ? C.femaleText : C.maleText,
-                      }}
-                    >
-                      {assignedCustomer.gender}
-                    </span>
-                    <span className="text-base truncate" style={{ color: C.assignText }}>
-                      {assignedCustomer.note || "已指定顧客"}
-                    </span>
+                    {assignedCustomer && (
+                      <div
+                        className="flex items-center gap-2 rounded-lg px-3 py-2"
+                        style={{ backgroundColor: C.assign }}
+                      >
+                        <span
+                          className="w-3.5 h-3.5 rounded-full flex-shrink-0"
+                          style={{ backgroundColor: assignedCustomer.color }}
+                        />
+                        <span
+                          className="text-sm font-semibold px-1.5 py-0.5 rounded-full flex-shrink-0"
+                          style={{
+                            backgroundColor: assignedCustomer.gender === "女" ? C.female : C.male,
+                            color: assignedCustomer.gender === "女" ? C.femaleText : C.maleText,
+                          }}
+                        >
+                          {assignedCustomer.gender}
+                        </span>
+                        <span className="text-base truncate" style={{ color: C.assignText }}>
+                          {assignedCustomer.note || "已指定顧客"}
+                        </span>
+                      </div>
+                    )}
+
+                    {/* 倒數顯示 */}
+                    <div className="flex flex-col">
+                      {isReady ? (
+                        <span
+                          className="font-mono-num text-5xl font-semibold"
+                          style={{ color: C.readyText }}
+                        >
+                          可接單
+                        </span>
+                      ) : (
+                        <>
+                          <span
+                            className="font-mono-num text-6xl font-semibold tabular-nums"
+                            style={{ color: textColorHex }}
+                          >
+                            {formatRemaining(remaining)}
+                          </span>
+                          <span className="text-xl mt-1" style={{ color: C.textMuted }}>
+                            累積 {slot.cycleMinutes} 分鐘・NT${calcPrice(slot.unitHistory)}・
+                            {formatClockTime(slot.readyAt)} 結束
+                          </span>
+                        </>
+                      )}
+                    </div>
+
+                    {/* 操作 */}
+                    <div className="grid grid-cols-2 gap-3 mt-auto">
+                      <button
+                        onClick={() => {
+                          addMinutes(slot.id, 15);
+                          scheduleAutoCollapse();
+                        }}
+                        className="flex items-center justify-center gap-2 rounded-lg active:scale-95 transition-all py-4 text-xl font-semibold whitespace-nowrap"
+                        style={{ backgroundColor: C.chipBg, color: C.text, border: `1px solid ${C.chipBorder}` }}
+                      >
+                        <Plus size={20} />
+                        15分鐘
+                      </button>
+                      <button
+                        onClick={() => {
+                          addMinutes(slot.id, 10);
+                          scheduleAutoCollapse();
+                        }}
+                        className="flex items-center justify-center gap-2 rounded-lg active:scale-95 transition-all py-4 text-xl font-semibold whitespace-nowrap"
+                        style={{ backgroundColor: C.chipBg, color: C.text, border: `1px solid ${C.chipBorder}` }}
+                      >
+                        <Plus size={20} />
+                        10分鐘
+                      </button>
+                      {!isReady && (
+                        <div className="col-span-2 flex gap-3">
+                          <button
+                            onClick={() => {
+                              undoUnit(slot.id);
+                              scheduleAutoCollapse();
+                            }}
+                            className="rounded-lg active:scale-95 transition-all py-3 text-lg font-medium whitespace-nowrap"
+                            style={{
+                              flex: 2,
+                              backgroundColor: C.chipBg,
+                              color: C.text,
+                              border: `1px solid ${C.chipBorder}`,
+                            }}
+                            title="退回最後一次按的單位"
+                          >
+                            上一步
+                          </button>
+                          <button
+                            onClick={() => {
+                              handleResetClick(slot.id);
+                              scheduleAutoCollapse();
+                            }}
+                            className="rounded-lg active:scale-95 transition-all py-3 text-sm font-medium whitespace-nowrap"
+                            style={
+                              resetConfirmId === slot.id
+                                ? {
+                                    flex: 1,
+                                    backgroundColor: C.urgentBg,
+                                    color: C.urgentText,
+                                    border: `1px solid ${C.urgentBorder}`,
+                                  }
+                                : {
+                                    flex: 1,
+                                    backgroundColor: C.page,
+                                    color: C.textFaint,
+                                    border: `1px solid ${C.panelBorder}`,
+                                  }
+                            }
+                            title="重置為可接單（需要按兩次確認）"
+                          >
+                            {resetConfirmId === slot.id ? "確定歸零？" : "歸零"}
+                          </button>
+                        </div>
+                      )}
+                    </div>
                   </div>
                 )}
-
-                {/* 倒數顯示 */}
-                <div className="flex flex-col">
-                  {isReady ? (
-                    <span
-                      className="font-mono-num text-5xl font-semibold"
-                      style={{ color: C.readyText }}
-                    >
-                      可接單
-                    </span>
-                  ) : (
-                    <>
-                      <span
-                        className="font-mono-num text-6xl font-semibold tabular-nums"
-                        style={{ color: textColorHex }}
-                      >
-                        {formatRemaining(remaining)}
-                      </span>
-                      <span className="text-xl mt-1" style={{ color: C.textMuted }}>
-                        累積 {slot.cycleMinutes} 分鐘・NT${calcPrice(slot.unitHistory)}・
-                        {formatClockTime(slot.readyAt)} 結束
-                      </span>
-                    </>
-                  )}
-                </div>
-
-                {/* 操作 */}
-                <div className="grid grid-cols-2 gap-3 mt-auto">
-                  <button
-                    onClick={() => addMinutes(slot.id, 15)}
-                    className="flex items-center justify-center gap-2 rounded-lg active:scale-95 transition-all py-4 text-xl font-semibold whitespace-nowrap"
-                    style={{ backgroundColor: C.chipBg, color: C.text, border: `1px solid ${C.chipBorder}` }}
-                  >
-                    <Plus size={20} />
-                    15分鐘
-                  </button>
-                  <button
-                    onClick={() => addMinutes(slot.id, 10)}
-                    className="flex items-center justify-center gap-2 rounded-lg active:scale-95 transition-all py-4 text-xl font-semibold whitespace-nowrap"
-                    style={{ backgroundColor: C.chipBg, color: C.text, border: `1px solid ${C.chipBorder}` }}
-                  >
-                    <Plus size={20} />
-                    10分鐘
-                  </button>
-                  {!isReady && (
-                    <div className="col-span-2 flex gap-3">
-                      <button
-                        onClick={() => undoUnit(slot.id)}
-                        className="rounded-lg active:scale-95 transition-all py-3 text-lg font-medium whitespace-nowrap"
-                        style={{
-                          flex: 2,
-                          backgroundColor: C.chipBg,
-                          color: C.text,
-                          border: `1px solid ${C.chipBorder}`,
-                        }}
-                        title="退回最後一次按的單位"
-                      >
-                        上一步
-                      </button>
-                      <button
-                        onClick={() => handleResetClick(slot.id)}
-                        className="rounded-lg active:scale-95 transition-all py-3 text-sm font-medium whitespace-nowrap"
-                        style={
-                          resetConfirmId === slot.id
-                            ? {
-                                flex: 1,
-                                backgroundColor: C.urgentBg,
-                                color: C.urgentText,
-                                border: `1px solid ${C.urgentBorder}`,
-                              }
-                            : {
-                                flex: 1,
-                                backgroundColor: C.page,
-                                color: C.textFaint,
-                                border: `1px solid ${C.panelBorder}`,
-                              }
-                        }
-                        title="重置為可接單（需要按兩次確認）"
-                      >
-                        {resetConfirmId === slot.id ? "確定歸零？" : "歸零"}
-                      </button>
-                    </div>
-                  )}
-                </div>
               </div>
             );
           })}
@@ -1124,17 +1380,34 @@ export default function DispatchBoard() {
                     className="w-2.5 h-2.5 rounded-full flex-shrink-0"
                     style={{ backgroundColor: C.offlineDot }}
                   />
-                  <span
-                    className="text-base font-medium flex-1 truncate"
-                    style={{ color: C.offlineText }}
-                  >
-                    {slot.name}
+                  <div className="flex-1 min-w-0 flex items-center gap-1.5">
+                    {editingId === slot.id ? (
+                      <input
+                        autoFocus
+                        value={draftName}
+                        onChange={(e) => setDraftName(e.target.value)}
+                        onBlur={() => commitEdit(slot.id)}
+                        onKeyDown={(e) => e.key === "Enter" && commitEdit(slot.id)}
+                        className="bg-transparent border-b text-base font-medium w-24 outline-none"
+                        style={{ color: C.offlineText, borderColor: C.textFaint }}
+                      />
+                    ) : (
+                      <button
+                        onClick={() => startEdit(slot)}
+                        className="text-base font-medium truncate flex items-center gap-1.5"
+                        style={{ color: C.offlineText }}
+                        title="下班中可以改名"
+                      >
+                        {slot.name}
+                        <Pencil size={12} style={{ opacity: 0.4 }} className="flex-shrink-0" />
+                      </button>
+                    )}
                     {slotLog.length > 0 && (
-                      <span className="text-sm ml-2" style={{ color: C.textFaint }}>
+                      <span className="text-sm flex-shrink-0" style={{ color: C.textFaint }}>
                         （今日 {slotLog.length} 人）
                       </span>
                     )}
-                  </span>
+                  </div>
                   {assignedCustomer && (
                     <span
                       className="text-xs font-medium px-2 py-1 rounded-full flex-shrink-0 whitespace-nowrap"
@@ -1156,12 +1429,12 @@ export default function DispatchBoard() {
                     </button>
                   ) : (
                     <button
-                      onClick={() => toggleActive(slot.id)}
+                      onClick={() => handleClockIn(slot.id)}
                       className="flex items-center gap-1 rounded-lg px-3 py-1.5 text-sm font-medium"
-                      style={{ backgroundColor: C.chipBg, color: C.text, border: `1px solid ${C.chipBorder}` }}
+                      style={{ backgroundColor: C.clockInBg, color: C.clockInText }}
                     >
-                      <Power size={12} />
-                      上線
+                      <Sun size={13} />
+                      上班
                     </button>
                   )}
                 </div>
