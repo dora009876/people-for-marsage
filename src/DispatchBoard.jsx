@@ -79,8 +79,9 @@ function estimatePriceForMinutes(minutes) {
 
 // 依一天的完整紀錄（log 陣列）組出跟畫面上「各編號今日接待人數」一致的表格式 CSV 內容。
 // 用 log 裡存的 slotName（完成當下的名字），不依賴目前的 slots，這樣歷史紀錄也能正確還原。
-// day 是這份資料對應的日期（yyyy-mm-dd），會寫在檔案最上方，這樣檔案就算被改檔名、轉傳、印出來，也看得出是哪一天的紀錄。
-function buildCsvContent(logData, day) {
+// 日期只靠檔名標示（例如 來客登記表_2026-08-25.csv），內容裡不重複放日期，
+// 這樣第一行維持乾淨的名字表頭，打開試算表軟體時第一行才會正確被當成表頭塗色。
+function buildCsvContent(logData) {
   const slotNames = [];
   const bySlot = {};
   logData.forEach((e) => {
@@ -93,7 +94,6 @@ function buildCsvContent(logData, day) {
   slotNames.forEach((name) => bySlot[name].sort((a, b) => a.time - b.time));
   const maxRows = Math.max(0, ...slotNames.map((n) => bySlot[n].length));
 
-  const dateLine = day ? `日期：${day}\n\n` : "";
   const header = "," + slotNames.join(",") + "\n";
   let rows = "";
   for (let i = 0; i < maxRows; i++) {
@@ -121,7 +121,7 @@ function buildCsvContent(logData, day) {
     0
   );
   const summary = `\n總計,人頭次,${totalCountValue}\n總計,金額,NT$${totalRevenueValue}`;
-  return "\uFEFF" + dateLine + header + rows + subtotalRow + summary;
+  return "\uFEFF" + header + rows + subtotalRow + summary;
 }
 
 function downloadCsvContent(content, filename) {
@@ -823,12 +823,12 @@ export default function DispatchBoard() {
   }, [slots, log]);
 
   const exportCsv = () => {
-    const csv = buildCsvContent(log, dayKey);
+    const csv = buildCsvContent(log);
     downloadCsvContent(csv, `來客登記表_${dayKey}.csv`);
   };
 
   const shareTodayCsv = async () => {
-    const csv = buildCsvContent(log, dayKey);
+    const csv = buildCsvContent(log);
     const filename = `來客登記表_${dayKey}.csv`;
     const shared = await shareCsvContent(csv, filename);
     if (!shared) {
@@ -1293,7 +1293,7 @@ export default function DispatchBoard() {
 
                           <div className="flex gap-2">
                             <button
-                              onClick={() => downloadCsvContent(buildCsvContent(dayLog, day), `來客登記表_${day}.csv`)}
+                              onClick={() => downloadCsvContent(buildCsvContent(dayLog), `來客登記表_${day}.csv`)}
                               className="flex items-center gap-1 rounded-lg px-3 py-1.5 text-sm font-medium"
                               style={{ backgroundColor: C.chipBg, color: C.text, border: `1px solid ${C.chipBorder}` }}
                             >
@@ -1302,7 +1302,7 @@ export default function DispatchBoard() {
                             </button>
                             <button
                               onClick={async () => {
-                                const csv = buildCsvContent(dayLog, day);
+                                const csv = buildCsvContent(dayLog);
                                 const filename = `來客登記表_${day}.csv`;
                                 const shared = await shareCsvContent(csv, filename);
                                 if (!shared) downloadCsvContent(csv, filename);
