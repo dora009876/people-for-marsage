@@ -49,7 +49,7 @@ const storage = {
 // 測試模式開關：平常正式使用請保持 60 * 1000（代表 1 分鐘 = 60 秒）。
 // 想快速測試時，把下面這一行改成 1000（1 分鐘 = 1 秒，方便快速測試倒數/完成邏輯），
 // 測完記得改回 60 * 1000，並按畫面上的「歸零」清掉測試產生的假紀錄，避免跟正式資料混在一起。
-const MINUTE_MS =  1000; // ← 測試時把這裡改成 1000，測完改回 60 * 1000
+const MINUTE_MS = 60 * 1000; // ← 測試時把這裡改成 1000，測完改回 60 * 1000
 // ============================================
 
 const URGENT_MS = 5 * MINUTE_MS; // 5 分鐘內 = 緊急
@@ -492,12 +492,18 @@ export default function DispatchBoard() {
       prev.map((s) => {
         if (s.id !== id || !s.active) return s;
         const isCurrentlyReady = !s.readyAt || s.readyAt <= Date.now();
+        const currentHistory = isCurrentlyReady ? [] : s.unitHistory;
+        // 防呆：15分鐘這個單位，同一輪最多只能按兩次，超過就不動作（避免手滑一直按）
+        if (minutes === 15) {
+          const fifteenCount = currentHistory.filter((u) => u === 15).length;
+          if (fifteenCount >= 2) return s;
+        }
         const base = isCurrentlyReady ? Date.now() : s.readyAt;
         return {
           ...s,
           readyAt: base + minutes * MINUTE_MS,
           cycleMinutes: (isCurrentlyReady ? 0 : s.cycleMinutes) + minutes,
-          unitHistory: [...(isCurrentlyReady ? [] : s.unitHistory), minutes],
+          unitHistory: [...currentHistory, minutes],
         };
       })
     );
@@ -1227,6 +1233,8 @@ export default function DispatchBoard() {
               ? `${assignedCustomer.gender}客人${assignedCustomer.note ? "・" + assignedCustomer.note : ""}`
               : "服務中";
             const activationRank = activationRankMap[slot.id];
+            const fifteenCount = isReady ? 0 : slot.unitHistory.filter((u) => u === 15).length;
+            const fifteenMaxed = fifteenCount >= 2;
 
             return (
               <div
@@ -1424,14 +1432,21 @@ export default function DispatchBoard() {
                     <div className="grid grid-cols-2 gap-3 mt-auto">
                       <button
                         onClick={() => {
+                          if (fifteenMaxed) return;
                           addMinutes(slot.id, 15);
                           scheduleAutoCollapse();
                         }}
+                        disabled={fifteenMaxed}
                         className="flex items-center justify-center gap-2 rounded-lg active:scale-95 transition-all py-4 text-xl font-semibold whitespace-nowrap"
-                        style={{ backgroundColor: C.chipBg, color: C.text, border: `1px solid ${C.chipBorder}` }}
+                        style={
+                          fifteenMaxed
+                            ? { backgroundColor: C.page, color: C.textFaint, border: `1px solid ${C.panelBorder}`, cursor: "not-allowed" }
+                            : { backgroundColor: C.chipBg, color: C.text, border: `1px solid ${C.chipBorder}` }
+                        }
+                        title={fifteenMaxed ? "這一輪已經按過兩次15分鐘了，最多只能按兩次" : "加15分鐘"}
                       >
                         <Plus size={20} />
-                        15分鐘
+                        15分鐘{fifteenMaxed ? "（已達上限）" : ""}
                       </button>
                       <button
                         onClick={() => {
