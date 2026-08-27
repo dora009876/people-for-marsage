@@ -49,7 +49,7 @@ const storage = {
 // 測試模式開關：平常正式使用請保持 60 * 1000（代表 1 分鐘 = 60 秒）。
 // 想快速測試時，把下面這一行改成 1000（1 分鐘 = 1 秒，方便快速測試倒數/完成邏輯），
 // 測完記得改回 60 * 1000，並按畫面上的「歸零」清掉測試產生的假紀錄，避免跟正式資料混在一起。
-const MINUTE_MS =  1000; // ← 測試時把這裡改成 1000，測完改回 60 * 1000
+const MINUTE_MS = 60 * 1000; // ← 測試時把這裡改成 1000，測完改回 60 * 1000
 // ============================================
 
 const URGENT_MS = 5 * MINUTE_MS; // 5 分鐘內 = 緊急
@@ -72,14 +72,8 @@ function calcPrice(units) {
 // 湊得出來就自動填金額；湊不出來（例如22分鐘這種怪數字）就回傳 null，讓使用者自己填金額。
 function estimatePriceForMinutes(minutes) {
   if (!minutes || minutes <= 0) return null;
-  const maxFifteens = Math.floor(minutes / 15);
-  for (let a = maxFifteens; a >= 0; a--) {
-    const remainder = minutes - a * 15;
-    if (remainder % 10 === 0) {
-      const b = remainder / 10;
-      return a * 200 + b * 100;
-    }
-  }
+  if (minutes === 15) return 200;
+  if (minutes % 10 === 0) return 100 * (minutes / 10) + 100;
   return null;
 }
 
