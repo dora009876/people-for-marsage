@@ -93,7 +93,7 @@ function buildCsvContent(logData, day) {
   slotNames.forEach((name) => bySlot[name].sort((a, b) => a.time - b.time));
   const maxRows = Math.max(0, ...slotNames.map((n) => bySlot[n].length));
 
-  const dateLine = day ? `日期,${day}\n\n` : "";
+  const dateLine = day ? `日期：${day}\n\n` : "";
   const header = "," + slotNames.join(",") + "\n";
   let rows = "";
   for (let i = 0; i < maxRows; i++) {
