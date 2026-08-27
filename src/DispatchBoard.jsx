@@ -68,6 +68,21 @@ function calcPrice(units) {
   return (units || []).reduce((sum, u) => sum + (PRICE_MAP[u] || 0), 0);
 }
 
+// 依分鐘數反推「應該是多少錢」：嘗試用15分鐘（優先）+10分鐘的組合湊出總分鐘數，
+// 湊得出來就自動填金額；湊不出來（例如22分鐘這種怪數字）就回傳 null，讓使用者自己填金額。
+function estimatePriceForMinutes(minutes) {
+  if (!minutes || minutes <= 0) return null;
+  const maxFifteens = Math.floor(minutes / 15);
+  for (let a = maxFifteens; a >= 0; a--) {
+    const remainder = minutes - a * 15;
+    if (remainder % 10 === 0) {
+      const b = remainder / 10;
+      return a * 200 + b * 100;
+    }
+  }
+  return null;
+}
+
 // 依一天的完整紀錄（log 陣列）組出跟畫面上「各編號今日接待人數」一致的表格式 CSV 內容。
 // 用 log 裡存的 slotName（完成當下的名字），不依賴目前的 slots，這樣歷史紀錄也能正確還原。
 function buildCsvContent(logData) {
@@ -267,6 +282,41 @@ function formatClockTime(ts) {
   return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 }
 
+// 用 Web Audio API 產生鈴聲，不需要另外準備音檔。
+// 瀏覽器通常要求先有一次使用者互動（例如按過任何按鈕）才能播放聲音，
+// 這個 App 本來就會一直按按鈕，所以之後倒數快結束時可以正常響鈴。
+// 響鈴總長10秒：每隔0.8秒響一小聲，總共響約12次，比單一聲更容易被注意到。
+function playBeep() {
+  try {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtx) return;
+    const ctx = new AudioCtx();
+    const totalDuration = 10; // 秒
+    const interval = 0.8; // 每聲間隔
+    const beepLength = 0.35; // 單聲長度
+    const beepCount = Math.floor(totalDuration / interval);
+
+    for (let i = 0; i < beepCount; i++) {
+      const startTime = ctx.currentTime + i * interval;
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = "sine";
+      osc.frequency.value = 880;
+      gain.gain.setValueAtTime(0.35, startTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, startTime + beepLength);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(startTime);
+      osc.stop(startTime + beepLength);
+    }
+
+    setTimeout(() => ctx.close(), (totalDuration + 0.5) * 1000);
+  } catch (e) {}
+}
+
+// 補登／編輯紀錄時，分鐘數下拉選單的預設選項：15分鐘（單一基本單位），之後每次+10分鐘累加
+const MINUTE_PRESET_OPTIONS = [15, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150];
+
 const ORDINAL_CN = ["一", "二", "三", "四", "五", "六", "七", "八", "九", "十"];
 function ordinalLabel(rank) {
   const word = ORDINAL_CN[rank - 1] || rank;
@@ -321,9 +371,16 @@ export default function DispatchBoard() {
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyDayData, setHistoryDayData] = useState({}); // 快取：{日期: log陣列}
   const [selectedHistoryDay, setSelectedHistoryDay] = useState(null);
+  const [editingLogId, setEditingLogId] = useState(null); // 正在編輯的紀錄id
+  const [editMinutesDraft, setEditMinutesDraft] = useState("");
+  const [editPriceDraft, setEditPriceDraft] = useState("");
+  const [addingEntrySlotId, setAddingEntrySlotId] = useState(null); // 正在手動補登紀錄的人頭id
+  const [newEntryMinutes, setNewEntryMinutes] = useState("15");
+  const [newEntryPrice, setNewEntryPrice] = useState("200");
   const [expandedIds, setExpandedIds] = useState(() => new Set()); // 精簡橫列中，被點開顯示完整操作的人頭id
   const [sortMode, setSortMode] = useState("activation"); // "activation" = 上班順序, "finish" = 結束順序
   const loadedRef = useRef(false);
+  const beepedRef = useRef({}); // { slotId: readyAt } 記錄這一輪已經響過3秒前提醒鈴的人頭，避免同一輪重複響
   const resetConfirmTimeoutRef = useRef(null);
   const dayKey = useMemo(() => todayKey(), []);
 
@@ -373,11 +430,21 @@ export default function DispatchBoard() {
       const t = Date.now();
       setNow(t);
       if (!loadedRef.current) return;
+
       setSlots((prev) => {
         const completions = [];
         const updated = prev.map((s) => {
+          // 倒數結束前3秒響一聲提醒鈴（每一輪只響一次）
+          if (s.active && s.readyAt) {
+            const remaining = s.readyAt - t;
+            if (remaining > 0 && remaining <= 3000 && beepedRef.current[s.id] !== s.readyAt) {
+              beepedRef.current[s.id] = s.readyAt;
+              playBeep();
+            }
+          }
           if (s.readyAt && s.readyAt <= t && s.cycleMinutes > 0) {
             completions.push({
+              id: `${s.id}-${s.readyAt}-${Math.random().toString(36).slice(2, 8)}`,
               slotId: s.id,
               slotName: s.name,
               minutes: s.cycleMinutes,
@@ -729,6 +796,7 @@ export default function DispatchBoard() {
     return slots.map((s) => {
       const entries = log.filter((e) => e.slotId === s.id);
       const mappedEntries = entries.map((e) => ({
+        id: e.id,
         minutes: e.minutes,
         price: e.price != null ? e.price : calcPrice(e.units),
         time: e.time,
@@ -815,6 +883,49 @@ export default function DispatchBoard() {
       }
     }
     setSelectedHistoryDay((prev) => (prev === day ? null : day));
+  };
+
+  const startEditLogEntry = (entry) => {
+    setEditingLogId(entry.id);
+    setEditMinutesDraft(String(entry.minutes));
+    setEditPriceDraft(String(entry.price));
+  };
+
+  const commitEditLogEntry = (id) => {
+    const minutes = Math.max(0, parseInt(editMinutesDraft, 10) || 0);
+    const price = Math.max(0, parseInt(editPriceDraft, 10) || 0);
+    setLog((prev) =>
+      prev.map((e) => (e.id === id ? { ...e, minutes, price, units: [] } : e))
+    );
+    setEditingLogId(null);
+  };
+
+  const deleteLogEntry = (id) => {
+    setLog((prev) => prev.filter((e) => e.id !== id));
+    setEditingLogId(null);
+  };
+
+  const startAddEntry = (slotId) => {
+    setAddingEntrySlotId(slotId);
+    setNewEntryMinutes("15");
+    setNewEntryPrice("200");
+  };
+
+  // 補登一筆漏按計時的紀錄：人少的時候有時忘記按+15/+10，事後可以手動補上分鐘數跟金額
+  const commitAddEntry = (slotId, slotName) => {
+    const minutes = Math.max(0, parseInt(newEntryMinutes, 10) || 0);
+    const price = Math.max(0, parseInt(newEntryPrice, 10) || 0);
+    const entry = {
+      id: `${slotId}-manual-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      slotId,
+      slotName,
+      minutes,
+      units: [],
+      price,
+      time: Date.now(),
+    };
+    setLog((prev) => [...prev, entry]);
+    setAddingEntrySlotId(null);
   };
 
   const addToQueue = () => {
@@ -1645,23 +1756,133 @@ export default function DispatchBoard() {
                 )}
 
                 {stat.entries.length === 0 ? (
-                  <p className="text-sm" style={{ color: C.textFaint }}>今日尚無紀錄</p>
+                  <p className="text-sm mb-2" style={{ color: C.textFaint }}>今日尚無紀錄</p>
                 ) : (
-                  <div className="flex flex-wrap gap-2">
-                    {stat.entries.map((entry, idx) => (
-                      <span
-                        key={idx}
-                        className="text-base font-medium px-3 py-1.5 rounded-lg whitespace-nowrap"
-                        style={{
-                          backgroundColor: C.page,
-                          color: C.text,
-                          border: `1px solid ${C.panelBorder}`,
-                        }}
-                      >
-                        {entry.minutes}分鐘・NT${entry.price}
-                      </span>
-                    ))}
+                  <div className="flex flex-wrap gap-2 mb-2">
+                    {stat.entries.map((entry) =>
+                      editingLogId === entry.id ? (
+                        <div
+                          key={entry.id}
+                          className="flex items-center gap-1.5 px-2 py-1.5 rounded-lg"
+                          style={{ backgroundColor: C.page, border: `1px solid ${C.assign}` }}
+                        >
+                          <select
+                            value={editMinutesDraft}
+                            onChange={(e) => {
+                              const val = e.target.value;
+                              setEditMinutesDraft(val);
+                              const estimated = estimatePriceForMinutes(parseInt(val, 10));
+                              if (estimated != null) setEditPriceDraft(String(estimated));
+                            }}
+                            className="text-sm rounded px-1.5 py-1 outline-none"
+                            style={{ backgroundColor: C.panelBg, color: C.text, border: `1px solid ${C.panelBorder}` }}
+                          >
+                            {(MINUTE_PRESET_OPTIONS.includes(parseInt(editMinutesDraft, 10))
+                              ? MINUTE_PRESET_OPTIONS
+                              : [parseInt(editMinutesDraft, 10) || 0, ...MINUTE_PRESET_OPTIONS].sort((a, b) => a - b)
+                            ).map((m) => (
+                              <option key={m} value={m}>
+                                {m}
+                              </option>
+                            ))}
+                          </select>
+                          <span className="text-sm" style={{ color: C.textMuted }}>分・NT$</span>
+                          <input
+                            type="number"
+                            value={editPriceDraft}
+                            onChange={(e) => setEditPriceDraft(e.target.value)}
+                            className="w-16 text-sm rounded px-1.5 py-1 outline-none"
+                            style={{ backgroundColor: C.panelBg, color: C.text, border: `1px solid ${C.panelBorder}` }}
+                          />
+                          <button
+                            onClick={() => commitEditLogEntry(entry.id)}
+                            className="rounded px-2 py-1 text-sm font-semibold"
+                            style={{ backgroundColor: C.assign, color: C.assignText }}
+                          >
+                            存
+                          </button>
+                          <button
+                            onClick={() => deleteLogEntry(entry.id)}
+                            className="rounded px-2 py-1 text-sm"
+                            style={{ backgroundColor: C.urgentBg, color: C.urgentText }}
+                          >
+                            刪
+                          </button>
+                        </div>
+                      ) : (
+                        <button
+                          key={entry.id}
+                          onClick={() => startEditLogEntry(entry)}
+                          className="text-base font-medium px-3 py-1.5 rounded-lg whitespace-nowrap"
+                          style={{
+                            backgroundColor: C.page,
+                            color: C.text,
+                            border: `1px solid ${C.panelBorder}`,
+                          }}
+                          title="點一下可以修改分鐘數或金額"
+                        >
+                          {entry.minutes}分鐘・NT${entry.price}
+                        </button>
+                      )
+                    )}
                   </div>
+                )}
+
+                {addingEntrySlotId === stat.id ? (
+                  <div
+                    className="flex items-center gap-1.5 px-2 py-1.5 rounded-lg"
+                    style={{ backgroundColor: C.page, border: `1px solid ${C.assign}` }}
+                  >
+                    <select
+                      value={newEntryMinutes}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        setNewEntryMinutes(val);
+                        const estimated = estimatePriceForMinutes(parseInt(val, 10));
+                        if (estimated != null) setNewEntryPrice(String(estimated));
+                      }}
+                      className="text-sm rounded px-1.5 py-1 outline-none"
+                      style={{ backgroundColor: C.panelBg, color: C.text, border: `1px solid ${C.panelBorder}` }}
+                    >
+                      {MINUTE_PRESET_OPTIONS.map((m) => (
+                        <option key={m} value={m}>
+                          {m}
+                        </option>
+                      ))}
+                    </select>
+                    <span className="text-sm" style={{ color: C.textMuted }}>分・NT$</span>
+                    <input
+                      type="number"
+                      value={newEntryPrice}
+                      onChange={(e) => setNewEntryPrice(e.target.value)}
+                      className="w-16 text-sm rounded px-1.5 py-1 outline-none"
+                      style={{ backgroundColor: C.panelBg, color: C.text, border: `1px solid ${C.panelBorder}` }}
+                    />
+                    <button
+                      onClick={() => commitAddEntry(stat.id, stat.name)}
+                      className="rounded px-2 py-1 text-sm font-semibold"
+                      style={{ backgroundColor: C.assign, color: C.assignText }}
+                    >
+                      新增
+                    </button>
+                    <button
+                      onClick={() => setAddingEntrySlotId(null)}
+                      className="rounded px-2 py-1 text-sm"
+                      style={{ backgroundColor: C.chipBg, color: C.chipText }}
+                    >
+                      取消
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    onClick={() => startAddEntry(stat.id)}
+                    className="flex items-center gap-1 text-sm font-medium px-2.5 py-1 rounded-lg"
+                    style={{ backgroundColor: C.page, color: C.textMuted, border: `1px dashed ${C.panelBorder}` }}
+                    title="漏按計時的話，可以在這裡手動補一筆"
+                  >
+                    <Plus size={12} />
+                    補登一筆
+                  </button>
                 )}
               </div>
             ))}
