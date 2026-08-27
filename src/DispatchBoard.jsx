@@ -157,12 +157,13 @@ function summarizeLog(logData) {
   const bySlot = {};
   logData.forEach((e) => {
     if (!bySlot[e.slotName]) {
-      bySlot[e.slotName] = { count: 0, revenue: 0 };
+      bySlot[e.slotName] = { count: 0, revenue: 0, entries: [] };
       order.push(e.slotName);
     }
     const price = e.price != null ? e.price : calcPrice(e.units);
     bySlot[e.slotName].count += 1;
     bySlot[e.slotName].revenue += price;
+    bySlot[e.slotName].entries.push({ id: e.id, minutes: e.minutes, price, time: e.time });
   });
   const totalCount = logData.length;
   const totalRevenue = order.reduce((sum, n) => sum + bySlot[n].revenue, 0);
@@ -366,11 +367,13 @@ export default function DispatchBoard() {
   const [historyDayData, setHistoryDayData] = useState({}); // 快取：{日期: log陣列}
   const [selectedHistoryDay, setSelectedHistoryDay] = useState(null);
   const [editingLogId, setEditingLogId] = useState(null); // 正在編輯的紀錄id
+  const [editScopeDay, setEditScopeDay] = useState(null); // null=今天，否則是正在編輯的歷史日期
   const [editMinutesDraft, setEditMinutesDraft] = useState("");
   const [editPriceDraft, setEditPriceDraft] = useState("");
   const [addingEntrySlotId, setAddingEntrySlotId] = useState(null); // 正在手動補登紀錄的人頭id
   const [newEntryMinutes, setNewEntryMinutes] = useState("15");
   const [newEntryPrice, setNewEntryPrice] = useState("200");
+  const [newEntrySlotName, setNewEntrySlotName] = useState(""); // 歷史紀錄補登時輸入的姓名
   const [expandedIds, setExpandedIds] = useState(() => new Set()); // 精簡橫列中，被點開顯示完整操作的人頭id
   const [sortMode, setSortMode] = useState("activation"); // "activation" = 上班順序, "finish" = 結束順序
   const loadedRef = useRef(false);
@@ -885,7 +888,14 @@ export default function DispatchBoard() {
     setSelectedHistoryDay((prev) => (prev === day ? null : day));
   };
 
-  const startEditLogEntry = (entry) => {
+  const persistHistoryDay = async (day, data) => {
+    try {
+      await storage.set(LOG_KEY_PREFIX + day, JSON.stringify(data), false);
+    } catch (e) {}
+  };
+
+  const startEditLogEntry = (entry, day = null) => {
+    setEditScopeDay(day);
     setEditingLogId(entry.id);
     setEditMinutesDraft(String(entry.minutes));
     setEditPriceDraft(String(entry.price));
@@ -894,27 +904,50 @@ export default function DispatchBoard() {
   const commitEditLogEntry = (id) => {
     const minutes = Math.max(0, parseInt(editMinutesDraft, 10) || 0);
     const price = Math.max(0, parseInt(editPriceDraft, 10) || 0);
-    setLog((prev) =>
-      prev.map((e) => (e.id === id ? { ...e, minutes, price, units: [] } : e))
-    );
+    const day = editScopeDay;
+    if (day) {
+      setHistoryDayData((prev) => {
+        const updated = (prev[day] || []).map((e) =>
+          e.id === id ? { ...e, minutes, price, units: [] } : e
+        );
+        persistHistoryDay(day, updated);
+        return { ...prev, [day]: updated };
+      });
+    } else {
+      setLog((prev) => prev.map((e) => (e.id === id ? { ...e, minutes, price, units: [] } : e)));
+    }
     setEditingLogId(null);
+    setEditScopeDay(null);
   };
 
   const deleteLogEntry = (id) => {
-    setLog((prev) => prev.filter((e) => e.id !== id));
+    const day = editScopeDay;
+    if (day) {
+      setHistoryDayData((prev) => {
+        const updated = (prev[day] || []).filter((e) => e.id !== id);
+        persistHistoryDay(day, updated);
+        return { ...prev, [day]: updated };
+      });
+    } else {
+      setLog((prev) => prev.filter((e) => e.id !== id));
+    }
     setEditingLogId(null);
+    setEditScopeDay(null);
   };
 
-  const startAddEntry = (slotId) => {
+  const startAddEntry = (slotId, day = null) => {
+    setEditScopeDay(day);
     setAddingEntrySlotId(slotId);
     setNewEntryMinutes("15");
     setNewEntryPrice("200");
   };
 
   // 補登一筆漏按計時的紀錄：人少的時候有時忘記按+15/+10，事後可以手動補上分鐘數跟金額
+  // day 有給值時代表是在補歷史紀錄，不是今天
   const commitAddEntry = (slotId, slotName) => {
     const minutes = Math.max(0, parseInt(newEntryMinutes, 10) || 0);
     const price = Math.max(0, parseInt(newEntryPrice, 10) || 0);
+    const day = editScopeDay;
     const entry = {
       id: `${slotId}-manual-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       slotId,
@@ -924,8 +957,17 @@ export default function DispatchBoard() {
       price,
       time: Date.now(),
     };
-    setLog((prev) => [...prev, entry]);
+    if (day) {
+      setHistoryDayData((prev) => {
+        const updated = [...(prev[day] || []), entry];
+        persistHistoryDay(day, updated);
+        return { ...prev, [day]: updated };
+      });
+    } else {
+      setLog((prev) => [...prev, entry]);
+    }
     setAddingEntrySlotId(null);
+    setEditScopeDay(null);
   };
 
   const addToQueue = () => {
@@ -1099,17 +1141,154 @@ export default function DispatchBoard() {
                           {summary.perSlot.length === 0 ? (
                             <p className="text-sm" style={{ color: C.textFaint }}>這天沒有紀錄</p>
                           ) : (
-                            <div className="space-y-1.5 mb-3">
+                            <div className="space-y-3 mb-3">
                               {summary.perSlot.map((s) => (
-                                <div key={s.name} className="flex items-center justify-between text-sm">
-                                  <span style={{ color: C.text }}>{s.name}</span>
-                                  <span style={{ color: C.textMuted }}>
-                                    {s.count} 人次・NT${s.revenue}
-                                  </span>
+                                <div key={s.name}>
+                                  <div className="flex items-center justify-between text-sm mb-1">
+                                    <span className="font-medium" style={{ color: C.text }}>{s.name}</span>
+                                    <span style={{ color: C.textMuted }}>
+                                      {s.count} 人次・NT${s.revenue}
+                                    </span>
+                                  </div>
+                                  <div className="flex flex-wrap gap-2">
+                                    {s.entries.map((entry) =>
+                                      editingLogId === entry.id ? (
+                                        <div
+                                          key={entry.id}
+                                          className="flex items-center gap-1.5 px-2 py-1.5 rounded-lg"
+                                          style={{ backgroundColor: C.panelBg, border: `1px solid ${C.assign}` }}
+                                        >
+                                          <select
+                                            value={editMinutesDraft}
+                                            onChange={(e) => {
+                                              const val = e.target.value;
+                                              setEditMinutesDraft(val);
+                                              const estimated = estimatePriceForMinutes(parseInt(val, 10));
+                                              if (estimated != null) setEditPriceDraft(String(estimated));
+                                            }}
+                                            className="text-sm rounded px-1.5 py-1 outline-none"
+                                            style={{ backgroundColor: C.page, color: C.text, border: `1px solid ${C.panelBorder}` }}
+                                          >
+                                            {(MINUTE_PRESET_OPTIONS.includes(parseInt(editMinutesDraft, 10))
+                                              ? MINUTE_PRESET_OPTIONS
+                                              : [parseInt(editMinutesDraft, 10) || 0, ...MINUTE_PRESET_OPTIONS].sort((a, b) => a - b)
+                                            ).map((m) => (
+                                              <option key={m} value={m}>{m}</option>
+                                            ))}
+                                          </select>
+                                          <span className="text-sm" style={{ color: C.textMuted }}>分・NT$</span>
+                                          <input
+                                            type="number"
+                                            value={editPriceDraft}
+                                            onChange={(e) => setEditPriceDraft(e.target.value)}
+                                            className="w-16 text-sm rounded px-1.5 py-1 outline-none"
+                                            style={{ backgroundColor: C.page, color: C.text, border: `1px solid ${C.panelBorder}` }}
+                                          />
+                                          <button
+                                            onClick={() => commitEditLogEntry(entry.id)}
+                                            className="rounded px-2 py-1 text-sm font-semibold"
+                                            style={{ backgroundColor: C.assign, color: C.assignText }}
+                                          >
+                                            存
+                                          </button>
+                                          <button
+                                            onClick={() => deleteLogEntry(entry.id)}
+                                            className="rounded px-2 py-1 text-sm"
+                                            style={{ backgroundColor: C.urgentBg, color: C.urgentText }}
+                                          >
+                                            刪
+                                          </button>
+                                        </div>
+                                      ) : (
+                                        <button
+                                          key={entry.id}
+                                          onClick={() => startEditLogEntry(entry, day)}
+                                          className="text-sm font-medium px-2.5 py-1 rounded-lg whitespace-nowrap"
+                                          style={{ backgroundColor: C.panelBg, color: C.text, border: `1px solid ${C.panelBorder}` }}
+                                          title="點一下可以修改分鐘數或金額"
+                                        >
+                                          {entry.minutes}分鐘・NT${entry.price}
+                                        </button>
+                                      )
+                                    )}
+                                  </div>
                                 </div>
                               ))}
                             </div>
                           )}
+
+                          {addingEntrySlotId === `${day}-manual` ? (
+                            <div
+                              className="flex items-center gap-1.5 px-2 py-1.5 rounded-lg mb-3"
+                              style={{ backgroundColor: C.panelBg, border: `1px solid ${C.assign}` }}
+                            >
+                              <input
+                                type="text"
+                                placeholder="姓名"
+                                value={newEntrySlotName}
+                                onChange={(e) => setNewEntrySlotName(e.target.value)}
+                                className="w-16 text-sm rounded px-1.5 py-1 outline-none"
+                                style={{ backgroundColor: C.page, color: C.text, border: `1px solid ${C.panelBorder}` }}
+                              />
+                              <select
+                                value={newEntryMinutes}
+                                onChange={(e) => {
+                                  const val = e.target.value;
+                                  setNewEntryMinutes(val);
+                                  const estimated = estimatePriceForMinutes(parseInt(val, 10));
+                                  if (estimated != null) setNewEntryPrice(String(estimated));
+                                }}
+                                className="text-sm rounded px-1.5 py-1 outline-none"
+                                style={{ backgroundColor: C.page, color: C.text, border: `1px solid ${C.panelBorder}` }}
+                              >
+                                {MINUTE_PRESET_OPTIONS.map((m) => (
+                                  <option key={m} value={m}>{m}</option>
+                                ))}
+                              </select>
+                              <span className="text-sm" style={{ color: C.textMuted }}>分・NT$</span>
+                              <input
+                                type="number"
+                                value={newEntryPrice}
+                                onChange={(e) => setNewEntryPrice(e.target.value)}
+                                className="w-16 text-sm rounded px-1.5 py-1 outline-none"
+                                style={{ backgroundColor: C.page, color: C.text, border: `1px solid ${C.panelBorder}` }}
+                              />
+                              <button
+                                onClick={() => {
+                                  if (!newEntrySlotName.trim()) return;
+                                  commitAddEntry(`${day}-manual`, newEntrySlotName.trim());
+                                  setNewEntrySlotName("");
+                                }}
+                                className="rounded px-2 py-1 text-sm font-semibold"
+                                style={{ backgroundColor: C.assign, color: C.assignText }}
+                              >
+                                新增
+                              </button>
+                              <button
+                                onClick={() => {
+                                  setAddingEntrySlotId(null);
+                                  setEditScopeDay(null);
+                                }}
+                                className="rounded px-2 py-1 text-sm"
+                                style={{ backgroundColor: C.chipBg, color: C.chipText }}
+                              >
+                                取消
+                              </button>
+                            </div>
+                          ) : (
+                            <button
+                              onClick={() => {
+                                startAddEntry(`${day}-manual`, day);
+                                setNewEntrySlotName("");
+                              }}
+                              className="flex items-center gap-1 text-sm font-medium px-2.5 py-1 rounded-lg mb-3"
+                              style={{ backgroundColor: C.panelBg, color: C.textMuted, border: `1px dashed ${C.panelBorder}` }}
+                            >
+                              <Plus size={12} />
+                              補登一筆
+                            </button>
+                          )}
+
                           <div className="flex gap-2">
                             <button
                               onClick={() => downloadCsvContent(buildCsvContent(dayLog), `來客登記表_${day}.csv`)}
